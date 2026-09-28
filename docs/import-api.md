@@ -41,9 +41,11 @@ Pocket ID에 기밀 OIDC 클라이언트를 만들고 PKCE를 활성화합니다
 3. Pocket ID 환경 변수와 `BUDGETBOOK_DB`를 설정해 `npm run import-api`를 실행합니다. 기본 바인딩은 `127.0.0.1:38181`입니다. 외부 접속에는 HTTPS 역방향 프록시를 사용하며 `BUDGETBOOK_HOST`/`BUDGETBOOK_PORT`를 설정할 수 있습니다.
 4. `https://가계부-도메인/admin/regex`에서 로그인해 규칙을 설정하고 자격증명을 발급합니다.
 
+자동 백업은 `BUDGETBOOK_BACKUP_DIR=/NAS/별도/백업경로`처럼 절대 경로를 지정하면 활성화됩니다. 서버는 시작 후 만기된 백업을 만들고 매시간 주기를 확인합니다. `/admin/backups`에서 기본 1일 주기와 최근 30개 보관 설정을 변경하거나 수동 실행할 수 있습니다. 백업은 SQLite 데이터베이스 파일이며 복구 시 서버를 중지하고 백업 파일로 DB 경로를 교체해야 합니다. 앱은 Google Drive 전송 및 자동 복구를 아직 지원하지 않습니다.
+
 ## 남은 범위
 
 - 가족별 독립 장부와 개인 계좌의 보고서 격리, 유사 거래 매칭, 분할/할부 승인 흐름.
-- NAS Docker Compose, HTTPS 프록시, 백업·Google Drive 연동.
+- NAS Docker Compose, HTTPS 프록시, Google Drive 백업 연동.
 
 OIDC 흐름은 라이브러리의 PKCE·state·nonce 및 ID 토큰 검증을 사용하지만, 실제 Pocket ID 서버와의 통합 테스트는 배포 환경에서 해야 합니다. 현재는 하나의 공유 장부에서 계좌별 접근 권한을 적용합니다. 개인 전용 계좌가 재무제표와 예산 집계까지 완전히 분리되는 기능은 아직 없어 민감한 개인 계좌를 가족 장부에 등록하지 않아야 합니다.

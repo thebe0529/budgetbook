@@ -1,10 +1,13 @@
 import { Book } from '../src/book.js';
 import { createImportApi } from '../src/import-api.js';
 import { createOidcAuth } from '../src/oidc-auth.js';
+import { createBackupManager, startBackupScheduler } from '../src/backups.js';
 
 const filename = process.env.BUDGETBOOK_DB;
 if (!filename) throw new Error('BUDGETBOOK_DB must point to an existing configured ledger database');
 const book = new Book(filename);
+const backupDirectory = process.env.BUDGETBOOK_BACKUP_DIR;
+if (backupDirectory) book.backupManager = createBackupManager(book, backupDirectory);
 const host = process.env.BUDGETBOOK_HOST ?? '127.0.0.1';
 const port = Number(process.env.BUDGETBOOK_PORT ?? 38181);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid BUDGETBOOK_PORT');
@@ -23,6 +26,8 @@ const auth = configured.every(Boolean) ? createOidcAuth(book, {
 }) : null;
 const server = createImportApi(book, { auth });
 server.listen(port, host, () => console.log(`Import API listening at ${host}:${port}`));
+const stopBackups = book.backupManager ? startBackupScheduler(book.backupManager,
+  error => console.error('Backup failed:', error)) : () => {};
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => server.close(() => { book.close(); process.exit(0); }));
+  process.on(signal, () => { stopBackups(); server.close(() => { book.close(); process.exit(0); }); });
 }

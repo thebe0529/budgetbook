@@ -18,6 +18,11 @@ export class Book {
       CREATE TABLE IF NOT EXISTS cash_schedule_links (
         schedule_id TEXT NOT NULL, occurrence_date TEXT NOT NULL, entry_id TEXT NOT NULL UNIQUE,
         linked_at TEXT NOT NULL, PRIMARY KEY (schedule_id, occurrence_date));
+      CREATE TABLE IF NOT EXISTS backup_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1), interval_days INTEGER NOT NULL DEFAULT 1,
+        keep_count INTEGER NOT NULL DEFAULT 30);
+      CREATE TABLE IF NOT EXISTS backup_runs (
+        id TEXT PRIMARY KEY, created_at TEXT NOT NULL, filename TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS adjustment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS import_channels (
         id TEXT PRIMARY KEY, account_id TEXT NOT NULL, token_hash TEXT NOT NULL,

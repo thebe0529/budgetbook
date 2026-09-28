@@ -13,6 +13,7 @@ import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './ca
 import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
+import { backupSettings, configureBackups, listBackups } from './backups.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -30,7 +31,8 @@ function page(title, content) {
     <a href="/admin/reports">보고서</a><a href="/admin/cards">카드 예정액</a>
     <a href="/admin/forecast">현금흐름 예상</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
-    <a href="/admin/family">가족 관리</a><a href="/auth/logout">로그아웃</a></nav>
+    <a href="/admin/family">가족 관리</a><a href="/admin/backups">백업</a>
+    <a href="/auth/logout">로그아웃</a></nav>
     <h1>${escape(title)}</h1>${content}</body></html>`;
 }
 
@@ -196,6 +198,25 @@ function renderAccountActivity(book, session, accountId, fromDate, throughDate) 
     <p>증감은 계정의 정상잔액 방향으로 표시합니다. 자산·비용은 차변, 부채·자본·수입은 대변이 증가합니다.</p>
     <table><tr><th>일자</th><th>분개 ID</th><th>메모</th><th>차변</th><th>대변</th><th>증감</th></tr>
     ${rows}</table><p><a href="/admin/reports?fromDate=${encodeURIComponent(fromDate)}&throughDate=${encodeURIComponent(throughDate)}">보고서로 돌아가기</a></p>`);
+}
+
+function renderBackups(book, session, message = '') {
+  if (session.role !== 'owner') throw new Error('Owner access required');
+  const settings = backupSettings(book, session.sub);
+  const rows = listBackups(book, session.sub).slice(0, 50).map(b => `<tr><td>${escape(b.created_at)}</td>
+    <td>${escape(b.filename)}</td></tr>`).join('');
+  return page('백업 설정', `${message}<p>서버의 백업 저장 경로: ${book.backupManager ?
+    '설정됨' : '미설정 (BUDGETBOOK_BACKUP_DIR 환경 변수 필요)'}</p>
+    <p>SQLite 일관성 검사 후 백업 파일을 저장합니다. 복구는 서버 관리자에게 파일 경로를 전달해 서버 중지 상태에서 진행합니다.</p>
+    <form method="post" action="/admin/backups/settings">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    <label>백업 주기 (일)</label><input type="number" name="intervalDays" min="1" max="30"
+      value="${settings.intervalDays}" required>
+    <label>보관할 최근 백업 수</label><input type="number" name="keepCount" min="1" max="365"
+      value="${settings.keepCount}" required><button>설정 저장</button></form>
+    ${book.backupManager ? `<form method="post" action="/admin/backups/run">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><button>지금 백업</button></form>` : ''}
+    <h2>최근 백업</h2><table><tr><th>생성 시각 (UTC)</th><th>파일</th></tr>${rows}</table>`);
 }
 
 function renderBudget(book, session, month, message = '') {
@@ -465,6 +486,25 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/backups') {
+      sendHtml(res, 200, renderBackups(book, session)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/backups/settings', '/admin/backups/run'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) {
+        sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
+      }
+      if (session.role !== 'owner') throw new Error('Owner access required');
+      if (pathname.endsWith('settings')) configureBackups(book, session.sub, {
+        intervalDays: Number(form.get('intervalDays')), keepCount: Number(form.get('keepCount')),
+      });
+      else {
+        if (!book.backupManager) throw new Error('Backup directory is not configured');
+        await book.backupManager.run();
+      }
+      sendHtml(res, 200, renderBackups(book, session, '<p class="notice">백업 설정을 반영했습니다.</p>'));
+      return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/forecast') {
       const query = new URL(req.url, 'http://localhost').searchParams;
       sendHtml(res, 200, renderForecast(book, session, query)); return true;
