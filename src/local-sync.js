@@ -1,5 +1,6 @@
 import { visibleAccounts, canAccessAccount } from './members.js';
 import { accountRegister, recordManual } from './manual.js';
+import { recordSplitManual } from './split-manual.js';
 
 export function localSnapshot(book, sub) {
   const accounts = visibleAccounts(book, sub);
@@ -17,9 +18,16 @@ export function localSnapshot(book, sub) {
 }
 
 export function acceptLocalTransaction(book, sub, input) {
-  if (!input || typeof input !== 'object' || !['expense', 'income', 'transfer'].includes(input.kind)) {
+  if (!input || typeof input !== 'object') {
     throw new Error('Invalid local transaction');
   }
+  if (input.kind === 'split') {
+    return recordSplitManual(book, sub, {
+      requestId: input.requestId, date: input.date, kind: input.splitKind,
+      accountId: input.accountId, memo: input.memo ?? '', lines: input.lines,
+    });
+  }
+  if (!['expense', 'income', 'transfer'].includes(input.kind)) throw new Error('Invalid local transaction');
   return recordManual(book, sub, {
     requestId: input.requestId, date: input.date, kind: input.kind,
     accountId: input.accountId, counterId: input.counterId,

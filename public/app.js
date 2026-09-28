@@ -67,29 +67,78 @@ async function getServer() {
 }
 
 function choose(select, entries) {
+  const previous = select.value;
   select.replaceChildren(...entries.map(([value, label]) => {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
     return option;
   }));
+  if (entries.some(([value]) => value === previous)) select.value = previous;
+}
+
+function splitRow() {
+  const row = document.createElement('tr');
+  const accountCell = document.createElement('td');
+  const account = document.createElement('select');
+  account.name = 'splitCounterId';
+  account.required = true;
+  accountCell.append(account);
+  const amountCell = document.createElement('td');
+  const amount = document.createElement('input');
+  amount.name = 'splitAmount';
+  amount.placeholder = '10000+2500';
+  amount.inputMode = 'decimal';
+  amount.required = true;
+  amountCell.append(amount);
+  const categoryCell = document.createElement('td');
+  const category = document.createElement('select');
+  category.name = 'splitCategory';
+  categoryCell.append(category);
+  const actionCell = document.createElement('td');
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.textContent = '삭제';
+  remove.addEventListener('click', () => {
+    if (document.querySelector('#split-rows').children.length > 2) row.remove();
+  });
+  actionCell.append(remove);
+  row.append(accountCell, amountCell, categoryCell, actionCell);
+  return row;
 }
 
 function render() {
   const snapshot = state.snapshot;
   workspace.hidden = false;
   const accountSelect = form.elements.accountId;
-  const selected = accountSelect.value;
-  choose(accountSelect, snapshot.accounts.filter(a => a.canWrite)
-    .map(a => [a.id, a.name]));
-  if (snapshot.accounts.some(a => a.id === selected && a.canWrite)) accountSelect.value = selected;
   const kind = form.elements.kind.value;
+  choose(accountSelect, snapshot.accounts.filter(a => a.canWrite &&
+    (kind === 'expense' || a.type === 'asset'))
+    .map(a => [a.id, a.name]));
   const source = snapshot.accounts.find(a => a.id === accountSelect.value);
   const counter = snapshot.counterpartAccounts.filter(a => kind === 'transfer' ?
     ['asset', 'liability'].includes(a.type) && a.id !== source?.id : a.type === kind);
   choose(form.elements.counterId, counter.map(a => [a.id, a.name]));
   choose(form.elements.categoryId, [['', '없음'], ...(kind === 'expense' && source?.onBudget ?
     snapshot.categories.map(c => [c.id, c.name]) : [])]);
+  const split = form.elements.mode.value === 'split';
+  document.querySelector('#single-fields').hidden = split;
+  document.querySelector('#split-fields').hidden = !split;
+  for (const field of document.querySelectorAll('#single-fields input,#single-fields select')) {
+    field.disabled = split;
+  }
+  const rows = document.querySelector('#split-rows');
+  if (rows.children.length < 2) rows.replaceChildren(splitRow(), splitRow());
+  for (const row of rows.children) {
+    choose(row.querySelector('[name="splitCounterId"]'), counter.map(a => [a.id, a.name]));
+    const amount = row.querySelector('[name="splitAmount"]');
+    const category = row.querySelector('[name="splitCategory"]');
+    choose(category, [['', '없음'], ...(kind === 'expense' && source?.onBudget ?
+      snapshot.categories.map(c => [c.id, c.name]) : [])]);
+    row.querySelector('[name="splitCounterId"]').disabled = !split;
+    amount.disabled = !split;
+    category.disabled = !split || kind !== 'expense' || !source?.onBudget;
+  }
   const accounts = document.querySelector('#accounts');
   accounts.replaceChildren(...snapshot.accounts.map(a => {
     const item = document.createElement('li');
@@ -99,7 +148,9 @@ function render() {
   const queue = document.querySelector('#queue');
   queue.replaceChildren(...state.pending.map(item => {
     const li = document.createElement('li');
-    li.textContent = `${item.date} ${item.memo || item.kind} · ${item.amountExpression}원 `;
+    li.textContent = item.kind === 'split' ?
+      `${item.date} ${item.memo || item.splitKind} · 분할 ${item.lines.length}행 (${item.lines.map(l => l.amountExpression).join(' + ')}) ` :
+      `${item.date} ${item.memo || item.kind} · ${item.amountExpression}원 `;
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.textContent = '대기 거래 삭제';
@@ -183,21 +234,45 @@ document.querySelector('#unlock-form').addEventListener('submit', async event =>
 });
 
 form.addEventListener('change', event => {
-  if (['kind', 'accountId'].includes(event.target.name)) render();
+  if (['mode', 'kind', 'accountId'].includes(event.target.name)) render();
+});
+document.querySelector('#add-split-row').addEventListener('click', () => {
+  const rows = document.querySelector('#split-rows');
+  if (rows.children.length >= 50) return;
+  rows.append(splitRow());
+  render();
 });
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (!state || Date.now() - state.verifiedAt > 30 * DAY) {
     status('오프라인 이용 기간이 지났습니다. 먼저 서버에서 로그인하고 동기화하세요.'); return;
   }
-  const data = Object.fromEntries(new FormData(form));
-  const input = { requestId: crypto.randomUUID(), date: data.date, kind: data.kind,
-    accountId: data.accountId, counterId: data.counterId, amountExpression: data.amountExpression,
-    categoryId: data.categoryId || null, memo: data.memo };
+  const values = new FormData(form);
+  const data = Object.fromEntries(values);
+  let input = { requestId: crypto.randomUUID(), date: data.date,
+    accountId: data.accountId, memo: data.memo };
+  if (data.mode === 'split') {
+    const counters = values.getAll('splitCounterId');
+    const amounts = values.getAll('splitAmount');
+    const categories = values.getAll('splitCategory');
+    if (counters.length < 2 || counters.length !== amounts.length ||
+      (categories.length && categories.length !== counters.length) ||
+      categories.some(Boolean) && categories.some(value => !value)) {
+      status('분할 거래 행과 예산 카테고리를 확인하세요.'); return;
+    }
+    input = { ...input, kind: 'split', splitKind: data.kind,
+      lines: counters.map((counterId, i) => ({ counterId, amountExpression: amounts[i],
+        categoryId: categories[i] || null })) };
+  } else {
+    input = { ...input, kind: data.kind, counterId: data.counterId,
+      amountExpression: data.amountExpression, categoryId: data.categoryId || null };
+  }
   state.pending.push(input);
   try { await save(); }
   catch (error) { state.pending.pop(); status(`로컬 저장 실패: ${error.message}`); return; }
-  form.reset(); render();
+  form.reset();
+  document.querySelector('#split-rows').replaceChildren(splitRow(), splitRow());
+  render();
   status('거래를 이 기기에 암호화해 저장했습니다. 서버 전송 전에는 잔액에 반영되지 않습니다.');
   if (navigator.onLine) sync();
 });

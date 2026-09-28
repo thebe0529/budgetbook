@@ -6,7 +6,7 @@
 <title>BudgetBook · 로컬 거래</title><style>
 body{max-width:720px;margin:1.5rem auto;padding:0 1rem;font:16px system-ui;line-height:1.5;color:#172333}
 nav{display:flex;gap:1rem;flex-wrap:wrap}h1{font-size:1.6rem}
-section{padding:1rem;margin:1rem 0;border:1px solid #d8e1eb;border-radius:8px}
+section{padding:1rem;margin:1rem 0;border:1px solid #d8e1eb;border-radius:8px;overflow-x:auto}
 label{display:block;margin:.7rem 0;font-weight:600}input,select,button{font:inherit;padding:.55rem;max-width:100%}
 label input,label select{display:block;width:100%;box-sizing:border-box}
 button{background:#174a7e;color:white;border:0;border-radius:5px;cursor:pointer;margin:.5rem .5rem .5rem 0}
@@ -24,12 +24,20 @@ button:disabled{opacity:.5}ul{padding-left:1.3rem}li{margin:.5rem 0}
 <section><h2>계좌 · 마지막 서버 동기화 잔액</h2><ul id="accounts"></ul></section>
 <section><h2>거래 추가</h2><form id="transaction-form">
 <label>일자<input name="date" type="date" required></label>
+<label>입력 방식<select name="mode"><option value="single">한 건</option>
+<option value="split">여러 행으로 분할</option></select></label>
 <label>유형<select name="kind"><option value="expense">지출</option><option value="income">수입</option>
 <option value="transfer">이체</option></select></label>
 <label>계좌<select name="accountId" required></select></label>
+<div id="single-fields">
 <label>상대 계정<select name="counterId" required></select></label>
 <label>금액 (사칙연산 가능)<input name="amountExpression" inputmode="decimal" required></label>
 <label>예산 카테고리<select name="categoryId"></select></label>
+</div>
+<div id="split-fields" hidden><p>행별 상대 계정과 금액을 입력하세요. 예산을 지정한다면 모든 행에 지정해야 합니다.</p>
+<table><thead><tr><th>상대 계정</th><th>금액</th><th>예산</th><th></th></tr></thead>
+<tbody id="split-rows"></tbody></table>
+<button id="add-split-row" type="button">행 추가</button></div>
 <label>메모<input name="memo" maxlength="500"></label>
 <button>로컬에 저장</button></form></section>
 <section><h2>전송 대기 거래</h2><p>대기 거래는 잔액에 반영되지 않습니다. 서버에 전송된 뒤 잔액을 다시 가져옵니다.</p>
