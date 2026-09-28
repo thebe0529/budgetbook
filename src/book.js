@@ -1,13 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { assertDate, validateAccount, validateEntry, balanceSheet, incomeStatement,
-  cashFlow, installmentSchedule } from './ledger.js';
+import { assertDate, assertMonth, validateAccount, validateEntry, balanceSheet, incomeStatement,
+  cashFlow, installmentSchedule, budgetSummary } from './ledger.js';
 
 export class Book {
   constructor(filename = ':memory:') {
     this.db = new DatabaseSync(filename);
     this.db.exec(`PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS account_groups (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS budget_categories (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS budget_assignments (month TEXT NOT NULL, category_id TEXT NOT NULL,
+        amount INTEGER NOT NULL, PRIMARY KEY (month, category_id));
       CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS adjustment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
@@ -32,6 +36,32 @@ export class Book {
       .map(row => { const value = JSON.parse(row.data); return [value.id, value]; }));
   }
 
+  accountGroups() {
+    return this.db.prepare('SELECT data FROM account_groups ORDER BY id').all()
+      .map(row => JSON.parse(row.data));
+  }
+
+  createAccountGroup(group) {
+    if (!group?.id || !group?.name || !['asset', 'liability'].includes(group.type)) {
+      throw new Error('Group requires id, name and asset or liability type');
+    }
+    this.db.prepare('INSERT INTO account_groups (id, data) VALUES (?, ?)')
+      .run(group.id, JSON.stringify(group));
+    return group;
+  }
+
+  budgetCategories() {
+    return new Map(this.db.prepare('SELECT data FROM budget_categories ORDER BY id').all()
+      .map(row => { const c = JSON.parse(row.data); return [c.id, c]; }));
+  }
+
+  createBudgetCategory(category) {
+    if (!category?.id || !category?.name) throw new Error('Budget category requires id and name');
+    this.db.prepare('INSERT INTO budget_categories (id, data) VALUES (?, ?)')
+      .run(category.id, JSON.stringify(category));
+    return category;
+  }
+
   entries() {
     return this.db.prepare('SELECT data FROM entries ORDER BY date, id').all()
       .map(row => JSON.parse(row.data));
@@ -39,15 +69,60 @@ export class Book {
 
   createAccount(account) {
     validateAccount(account);
+    if (account.groupId) {
+      const group = this.accountGroups().find(g => g.id === account.groupId);
+      if (!group || group.type !== account.type) throw new Error('Account group type mismatch');
+    }
     this.db.prepare('INSERT INTO accounts (id, data) VALUES (?, ?)').run(account.id, JSON.stringify(account));
     return account;
   }
 
   record(entry) {
     validateEntry(entry, this.accounts());
+    this.validateBudgetAllocations(entry);
     this.db.prepare('INSERT INTO entries (id, date, data) VALUES (?, ?, ?)')
       .run(entry.id, entry.date, JSON.stringify(entry));
     return entry;
+  }
+
+  validateBudgetAllocations(entry) {
+    const accounts = this.accounts();
+    const items = entry.budgetAllocations ?? [];
+    if (!Array.isArray(items)) throw new Error('Budget allocations must be a list');
+    if (items.length === 0) return;
+    if (!entry.postings.some(p => accounts.get(p.accountId).onBudget &&
+      ['asset', 'liability'].includes(accounts.get(p.accountId).type))) {
+      throw new Error('Budget spending requires an on-budget account');
+    }
+    const expenseTotal = entry.postings.filter(p => accounts.get(p.accountId).type === 'expense')
+      .reduce((n, p) => n + (p.side === 'debit' ? p.amount : -p.amount), 0);
+    let allocationTotal = 0;
+    const categories = this.budgetCategories();
+    for (const item of items) {
+      if (!categories.has(item.categoryId) || !Number.isSafeInteger(item.amount) || item.amount === 0) {
+        throw new Error('Invalid budget allocation');
+      }
+      allocationTotal += item.amount;
+    }
+    if (!Number.isSafeInteger(allocationTotal) || allocationTotal !== expenseTotal) {
+      throw new Error('Budget splits must equal expense postings');
+    }
+  }
+
+  assignBudget(month, categoryId, amount) {
+    assertMonth(month);
+    if (!this.budgetCategories().has(categoryId) || !Number.isSafeInteger(amount) || amount < 0) {
+      throw new Error('Invalid budget assignment');
+    }
+    this.db.prepare(`INSERT INTO budget_assignments (month, category_id, amount) VALUES (?, ?, ?)
+      ON CONFLICT(month, category_id) DO UPDATE SET amount=excluded.amount`)
+      .run(month, categoryId, amount);
+  }
+
+  budget(throughMonth) {
+    const assignments = this.db.prepare('SELECT month, category_id, amount FROM budget_assignments').all()
+      .map(a => ({ month: a.month, categoryId: a.category_id, amount: a.amount }));
+    return budgetSummary(this.accounts(), this.entries(), this.budgetCategories(), assignments, throughMonth);
   }
 
   reports(fromDate, throughDate) {
@@ -58,7 +133,8 @@ export class Book {
       cashFlow: cashFlow(accounts, entries, fromDate, throughDate) };
   }
 
-  cardPurchase({ id = randomUUID(), date, cardId, expenseId, amount, count, firstDueDate, memo = '' }) {
+  cardPurchase({ id = randomUUID(), date, cardId, expenseId, amount, count, firstDueDate,
+    categoryId, memo = '' }) {
     assertDate(date);
     const accounts = this.accounts();
     if (!accounts.get(cardId)?.card || accounts.get(expenseId)?.type !== 'expense') {
@@ -67,7 +143,8 @@ export class Book {
     const installments = installmentSchedule(amount, count, firstDueDate);
     const entry = { id: `purchase:${id}`, date, memo,
       postings: [{ accountId: expenseId, side: 'debit', amount },
-        { accountId: cardId, side: 'credit', amount }] };
+        { accountId: cardId, side: 'credit', amount }],
+      ...(categoryId ? { budgetAllocations: [{ categoryId, amount }] } : {}) };
     const plan = { id, purchaseEntryId: entry.id, cardId, installments };
     return this.atomic(() => {
       this.record(entry);

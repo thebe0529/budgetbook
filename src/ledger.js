@@ -14,6 +14,9 @@ export function validateAccount(account) {
   }
   if (account.cash && account.type !== 'asset') throw new Error('Cash account must be an asset');
   if (account.card && account.type !== 'liability') throw new Error('Card account must be a liability');
+  if (account.onBudget !== undefined && typeof account.onBudget !== 'boolean') {
+    throw new Error('onBudget must be a boolean');
+  }
 }
 
 export function validateEntry(entry, accounts) {
@@ -106,4 +109,37 @@ export function installmentSchedule(total, count, firstDueDate) {
   const base = Math.floor(total / count);
   return Array.from({ length: count }, (_, i) => ({ index: i + 1,
     dueDate: addMonths(firstDueDate, i), amount: base + (i < total % count ? 1 : 0), paidEntryId: null }));
+}
+
+export function assertMonth(month) {
+  if (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    throw new Error('Month must be YYYY-MM');
+  }
+}
+
+export function budgetSummary(accounts, entries, categories, allocations, throughMonth) {
+  assertMonth(throughMonth);
+  const throughDate = `${throughMonth}-${new Date(Date.UTC(Number(throughMonth.slice(0, 4)),
+    Number(throughMonth.slice(5, 7)), 0)).getUTCDate()}`;
+  const accountBalances = balances(accounts, entries, throughDate);
+  const availableFunds = [...accounts.values()].filter(a => a.onBudget &&
+    ['asset', 'liability'].includes(a.type)).reduce((n, a) => n +
+      accountBalances[a.id] * (a.type === 'liability' ? -1 : 1), 0);
+  const result = Object.fromEntries([...categories.values()].map(c => [c.id,
+    { categoryId: c.id, name: c.name, budgeted: 0, spent: 0, balance: 0 }]));
+  for (const assignment of allocations) {
+    if (assignment.month > throughMonth) continue;
+    result[assignment.categoryId].balance += assignment.amount;
+    if (assignment.month === throughMonth) result[assignment.categoryId].budgeted += assignment.amount;
+  }
+  for (const entry of entries) {
+    if (entry.date > throughDate) continue;
+    for (const allocation of entry.budgetAllocations ?? []) {
+      result[allocation.categoryId].balance -= allocation.amount;
+      if (entry.date.startsWith(throughMonth)) result[allocation.categoryId].spent += allocation.amount;
+    }
+  }
+  const categoryBalance = Object.values(result).reduce((n, c) => n + c.balance, 0);
+  return { throughMonth, availableFunds, readyToAssign: availableFunds - categoryBalance,
+    categories: result };
 }
