@@ -22,6 +22,9 @@ button:disabled{opacity:.5}ul{padding-left:1.3rem}li{margin:.5rem 0}
 <button>열기</button></form></section>
 <main id="workspace" hidden>
 <section><h2>계좌 · 마지막 서버 동기화 잔액</h2><ul id="accounts"></ul></section>
+<section><h2>최근 거래 · 마지막 동기화 내역</h2>
+<p>아래 분할 거래만 오프라인 수정 대기열에 넣을 수 있습니다. 다른 기기에서 먼저 수정하면 동기화 시 충돌을 알립니다.</p>
+<ul id="history"></ul></section>
 <section><h2>거래 추가</h2><form id="transaction-form">
 <label>일자<input name="date" type="date" required></label>
 <label>입력 방식<select name="mode"><option value="single">한 건</option>
@@ -39,7 +42,7 @@ button:disabled{opacity:.5}ul{padding-left:1.3rem}li{margin:.5rem 0}
 <tbody id="split-rows"></tbody></table>
 <button id="add-split-row" type="button">행 추가</button></div>
 <label>메모<input name="memo" maxlength="500"></label>
-<button>로컬에 저장</button></form></section>
+<button>로컬에 저장</button><button id="cancel-edit" type="button" hidden>수정 취소</button></form></section>
 <section><h2>전송 대기 거래</h2><p>대기 거래는 잔액에 반영되지 않습니다. 서버에 전송된 뒤 잔액을 다시 가져옵니다.</p>
 <ul id="queue"></ul><button id="sync-button" type="button">지금 동기화</button>
 <button id="lock-button" type="button">잠금</button></section></main>

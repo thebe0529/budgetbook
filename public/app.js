@@ -107,6 +107,47 @@ function splitRow() {
   return row;
 }
 
+function resetEditor() {
+  delete form.dataset.editId;
+  delete form.dataset.editRevision;
+  delete form.dataset.editAccountId;
+  form.elements.mode.disabled = false;
+  form.elements.accountId.disabled = false;
+  document.querySelector('#cancel-edit').hidden = true;
+  form.reset();
+  document.querySelector('#split-rows').replaceChildren(splitRow(), splitRow());
+  render();
+}
+
+function editSplit(account, row) {
+  if (state.pending.some(p => p.entryId === row.id)) {
+    status('이 거래의 수정 요청이 이미 대기 중입니다. 먼저 동기화하거나 해당 요청을 삭제하세요.');
+    return;
+  }
+  form.dataset.editId = row.id;
+  form.dataset.editRevision = String(row.split.revision);
+  form.dataset.editAccountId = account.id;
+  form.elements.mode.value = 'split';
+  form.elements.kind.value = row.split.splitKind;
+  form.elements.accountId.value = account.id;
+  form.elements.date.value = row.date;
+  form.elements.memo.value = row.memo;
+  const rows = document.querySelector('#split-rows');
+  rows.replaceChildren(...row.split.lines.map(() => splitRow()));
+  render();
+  for (const [i, line] of row.split.lines.entries()) {
+    const fields = rows.children[i];
+    fields.querySelector('[name="splitCounterId"]').value = line.counterId;
+    fields.querySelector('[name="splitAmount"]').value = String(line.amount);
+    fields.querySelector('[name="splitCategory"]').value = line.categoryId ?? '';
+  }
+  form.elements.mode.disabled = true;
+  form.elements.accountId.disabled = true;
+  document.querySelector('#cancel-edit').hidden = false;
+  status(`${row.date} 분할 거래 수정 중 · 서버의 거래 버전 ${row.split.revision}`);
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function render() {
   const snapshot = state.snapshot;
   workspace.hidden = false;
@@ -145,11 +186,26 @@ function render() {
     item.textContent = `${a.name}: ${Number(a.balance).toLocaleString('ko-KR')}원`;
     return item;
   }));
+  const history = document.querySelector('#history');
+  history.replaceChildren(...(source?.rows ?? []).slice(0, 40).map(row => {
+    const li = document.createElement('li');
+    li.textContent = `${row.date} ${row.memo || row.id} · ${Number(row.movement).toLocaleString('ko-KR')}원
+      (잔액 ${Number(row.balance).toLocaleString('ko-KR')}원) `;
+    if (row.split) {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.textContent = '분할 수정';
+      edit.addEventListener('click', () => editSplit(source, row));
+      li.append(edit);
+    }
+    return li;
+  }));
   const queue = document.querySelector('#queue');
   queue.replaceChildren(...state.pending.map(item => {
     const li = document.createElement('li');
-    li.textContent = item.kind === 'split' ?
-      `${item.date} ${item.memo || item.splitKind} · 분할 ${item.lines.length}행 (${item.lines.map(l => l.amountExpression).join(' + ')}) ` :
+    li.textContent = ['split', 'split-update'].includes(item.kind) ?
+      `${item.date} ${item.memo || item.splitKind} · ${item.kind === 'split-update' ? '수정' : '분할'}
+      ${item.lines.length}행 (${item.lines.map(l => l.amountExpression).join(' + ')}) ` :
       `${item.date} ${item.memo || item.kind} · ${item.amountExpression}원 `;
     const remove = document.createElement('button');
     remove.type = 'button';
@@ -185,7 +241,8 @@ async function sync() {
       if (!response.ok) {
         const result = await response.json();
         throw new Error(response.status === 401 ? 'Pocket ID 로그인이 필요합니다.' :
-          `전송 대기 거래 오류 (${response.status}): ${result.error || '확인 필요'}`);
+          `전송 대기 거래 오류 (${response.status}): ${result.error || '확인 필요'}${response.status === 409 ?
+            ' · 최신 거래를 확인하고 대기 요청을 삭제한 뒤 다시 수정하세요.' : ''}`);
       }
       state.pending.shift();
       await save();
@@ -242,6 +299,10 @@ document.querySelector('#add-split-row').addEventListener('click', () => {
   rows.append(splitRow());
   render();
 });
+document.querySelector('#cancel-edit').addEventListener('click', () => {
+  resetEditor();
+  status('분할 거래 수정을 취소했습니다.');
+});
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (!state || Date.now() - state.verifiedAt > 30 * DAY) {
@@ -249,9 +310,10 @@ form.addEventListener('submit', async event => {
   }
   const values = new FormData(form);
   const data = Object.fromEntries(values);
+  const editing = Boolean(form.dataset.editId);
   let input = { requestId: crypto.randomUUID(), date: data.date,
-    accountId: data.accountId, memo: data.memo };
-  if (data.mode === 'split') {
+    accountId: editing ? form.dataset.editAccountId : data.accountId, memo: data.memo };
+  if (editing || data.mode === 'split') {
     const counters = values.getAll('splitCounterId');
     const amounts = values.getAll('splitAmount');
     const categories = values.getAll('splitCategory');
@@ -260,7 +322,9 @@ form.addEventListener('submit', async event => {
       categories.some(Boolean) && categories.some(value => !value)) {
       status('분할 거래 행과 예산 카테고리를 확인하세요.'); return;
     }
-    input = { ...input, kind: 'split', splitKind: data.kind,
+    input = { ...input, kind: editing ? 'split-update' : 'split', splitKind: data.kind,
+      ...(editing ? { entryId: form.dataset.editId,
+        expectedRevision: Number(form.dataset.editRevision) } : {}),
       lines: counters.map((counterId, i) => ({ counterId, amountExpression: amounts[i],
         categoryId: categories[i] || null })) };
   } else {
@@ -270,10 +334,9 @@ form.addEventListener('submit', async event => {
   state.pending.push(input);
   try { await save(); }
   catch (error) { state.pending.pop(); status(`로컬 저장 실패: ${error.message}`); return; }
-  form.reset();
-  document.querySelector('#split-rows').replaceChildren(splitRow(), splitRow());
-  render();
-  status('거래를 이 기기에 암호화해 저장했습니다. 서버 전송 전에는 잔액에 반영되지 않습니다.');
+  resetEditor();
+  status(editing ? '분할 거래 수정 요청을 이 기기에 저장했습니다. 동기화 전 원거래는 변경되지 않습니다.' :
+    '거래를 이 기기에 암호화해 저장했습니다. 서버 전송 전에는 잔액에 반영되지 않습니다.');
   if (navigator.onLine) sync();
 });
 

@@ -106,3 +106,56 @@ test('queued split transaction is validated and posted atomically with budget al
     assert.equal(book.entries().length, 1);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
+
+test('offline split edits use optimistic revision and retry safely after a lost response', async () => {
+  const book = new Book();
+  ensureOwner(book, 'owner');
+  const bank = createLedgerAccount(book, 'owner', { name: '공유 통장', type: 'asset', onBudget: true });
+  const food = createLedgerAccount(book, 'owner', { name: '식비', type: 'expense' });
+  const hidden = createLedgerAccount(book, 'owner', { name: '개인 통장', type: 'asset' });
+  setMember(book, 'owner', 'editor', 'editor', [bank.id]);
+  setMember(book, 'owner', 'viewer', 'viewer', [bank.id]);
+  const auth = { session: req => {
+    const sub = req.headers.cookie === 'viewer=1' ? 'viewer' : 'editor';
+    return { sub, role: sub, csrf: 'token' };
+  } };
+  const server = createImportApi(book, { auth });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const send = (body, cookie = '') => fetch(`${url}/api/v1/local/transactions`, {
+    method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json',
+      'X-CSRF-Token': 'token' }, body: JSON.stringify(body),
+  });
+  try {
+    const initial = { requestId: randomUUID(), date: '2026-10-21', kind: 'split', splitKind: 'expense',
+      accountId: bank.id, memo: '처음', lines: [
+        { counterId: food.id, amountExpression: '1000' },
+        { counterId: food.id, amountExpression: '2000' },
+      ] };
+    assert.equal((await send(initial)).status, 201);
+    const read = await (await fetch(`${url}/api/v1/local/state`)).json();
+    assert.equal(read.accounts.length, 1);
+    assert.equal(read.accounts[0].rows[0].split.revision, 1);
+    assert.deepEqual(read.accounts[0].rows[0].split.lines.map(l => l.amount), [1000, 2000]);
+    const viewerRead = await (await fetch(`${url}/api/v1/local/state`, {
+      headers: { Cookie: 'viewer=1' },
+    })).json();
+    assert.equal(viewerRead.accounts[0].rows[0].split, undefined);
+    assert.ok(!read.accounts.some(a => a.id === hidden.id));
+    const update = { ...initial, requestId: randomUUID(), kind: 'split-update',
+      entryId: `manual:${initial.requestId}`, expectedRevision: 1, memo: '수정',
+      lines: [{ counterId: food.id, amountExpression: '500' },
+        { counterId: food.id, amountExpression: '750' }] };
+    assert.equal((await send({ ...update, requestId: null })).status, 400);
+    assert.equal((await send(update, 'viewer=1')).status, 400);
+    assert.equal((await send(update)).status, 201);
+    const retry = await send(update);
+    assert.equal(retry.status, 200);
+    assert.equal((await retry.json()).duplicate, true);
+    assert.equal((await send({ ...update, memo: '다른 내용' })).status, 400);
+    assert.equal((await send({ ...update, requestId: randomUUID(), expectedRevision: 1 })).status, 409);
+    assert.equal(book.entries().length, 1);
+    assert.equal(book.db.prepare('SELECT COUNT(*) AS n FROM entry_revisions').get().n, 1);
+    assert.equal((await (await fetch(`${url}/api/v1/local/state`)).json()).accounts[0].balance, -1250);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});

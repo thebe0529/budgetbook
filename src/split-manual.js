@@ -91,6 +91,21 @@ export function updateSplitManual(book, userSub, entryId, expectedRevision, inpu
   return book.atomic(() => {
     const previous = editableManual(book, userSub, entryId);
     if (!previous) throw new Error('Split transaction cannot be edited');
+    const requestId = input.updateRequestId;
+    if (requestId && (typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId))) {
+      throw new Error('Valid request ID required');
+    }
+    const requestHash = requestId ? hash({ entryId, expectedRevision, date: input.date,
+      kind: input.kind, accountId: input.accountId, memo: input.memo ?? '', lines: input.lines }) : null;
+    if (requestId) {
+      const sent = book.db.prepare('SELECT * FROM entry_update_requests WHERE request_id = ?').get(requestId);
+      if (sent) {
+        if (sent.entry_id !== entryId || sent.actor_sub !== userSub || sent.payload_hash !== requestHash) {
+          throw new Error('Request ID reused with different split update');
+        }
+        return previous;
+      }
+    }
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== previous.revision) {
       throw new Error('Transaction changed; reload before editing');
     }
@@ -107,6 +122,9 @@ export function updateSplitManual(book, userSub, entryId, expectedRevision, inpu
       JSON.stringify(previous), userSub, new Date().toISOString());
     book.db.prepare('UPDATE entries SET date = ?, data = ? WHERE id = ?')
       .run(next.date, JSON.stringify(next), entryId);
+    if (requestId) book.db.prepare(`INSERT INTO entry_update_requests
+      (request_id, entry_id, actor_sub, payload_hash, applied_revision) VALUES (?, ?, ?, ?, ?)`)
+      .run(requestId, entryId, userSub, requestHash, next.revision);
     return next;
   });
 }

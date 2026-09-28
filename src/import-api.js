@@ -70,7 +70,8 @@ export function createImportApi(book, { auth } = {}) {
         const { entry, duplicate } = acceptLocalTransaction(book, session.sub, await readBody(req));
         return json(res, duplicate ? 200 : 201, { id: entry.id, duplicate });
       } catch (error) {
-        return json(res, 400, { error: error.message });
+        return json(res, /reload before editing/.test(error.message) ? 409 : 400,
+          { error: error.message });
       }
     }
     if (pathname.startsWith('/admin/') || pathname.startsWith('/auth/')) {

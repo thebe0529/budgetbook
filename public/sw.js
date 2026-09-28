@@ -1,4 +1,4 @@
-const CACHE = 'budgetbook-shell-v2';
+const CACHE = 'budgetbook-shell-v3';
 const FILES = ['/app/', '/app/app.js', '/app/manifest.json', '/app/icon.svg',
   '/app/icon-192.png', '/app/icon-512.png'];
 self.addEventListener('install', event => {

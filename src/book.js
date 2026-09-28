@@ -55,7 +55,10 @@ export class Book {
       CREATE TABLE IF NOT EXISTS entry_revisions (
         entry_id TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL,
         actor_sub TEXT NOT NULL, changed_at TEXT NOT NULL,
-        PRIMARY KEY(entry_id, revision));`);
+        PRIMARY KEY(entry_id, revision));
+      CREATE TABLE IF NOT EXISTS entry_update_requests (
+        request_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, actor_sub TEXT NOT NULL,
+        payload_hash TEXT NOT NULL, applied_revision INTEGER NOT NULL);`);
   }
 
   close() { this.db.close(); }
