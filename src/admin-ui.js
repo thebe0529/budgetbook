@@ -6,10 +6,11 @@ import { randomUUID } from 'node:crypto';
 import { accountOverview, accountRegister, createCategory, createGroup,
   createLedgerAccount, recordManual } from './manual.js';
 import { calculateAmount } from './amount-expression.js';
-import { assertDate, assertMonth } from './ledger.js';
+import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
 import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
+import { disableSchedule, forecast, listSchedules, saveSchedule } from './forecast.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -25,6 +26,7 @@ function page(title, content) {
     table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #d8e1eb;padding:.5rem;text-align:left}
     </style></head><body><nav><a href="/admin/accounts">계좌</a><a href="/admin/budget">예산</a>
     <a href="/admin/reports">보고서</a><a href="/admin/cards">카드 예정액</a>
+    <a href="/admin/forecast">현금흐름 예상</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
     <a href="/admin/family">가족 관리</a><a href="/auth/logout">로그아웃</a></nav>
     <h1>${escape(title)}</h1>${content}</body></html>`;
@@ -224,6 +226,55 @@ function renderCards(book, session, throughDate, message = '') {
     <table><tr><th>예정일</th><th>카드</th><th>메모</th><th>회차</th><th>금액</th><th>결제</th></tr>${rows}</table>`);
 }
 
+function renderForecast(book, session, query, message = '') {
+  if (session.role !== 'owner') throw new Error('Owner access required');
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  const asOf = query.get('asOf') || today;
+  const throughDate = query.get('throughDate') || addMonths(today, 12);
+  const cash = [...book.accounts().values()].filter(a => a.cash);
+  const schedules = listSchedules(book, session.sub);
+  const cardCashId = query.get('cardCashId') || '';
+  const overrides = Object.fromEntries(schedules.filter(s => query.has(`amount_${s.id}`))
+    .map(s => [s.id, query.get(`amount_${s.id}`)]));
+  const result = forecast(book, session.sub, { asOf, throughDate, cardCashId, overrides });
+  const cashOptions = cash.map(a => `<option value="${escape(a.id)}" ${a.id === cardCashId ? 'selected' : ''}>
+    ${escape(a.name)}</option>`).join('');
+  const accountOptions = cash.map(a => `<option value="${escape(a.id)}">${escape(a.name)}</option>`).join('');
+  const scheduleRows = schedules.map(s => `<tr><td>${escape(s.name)}</td>
+    <td>${escape(cash.find(a => a.id === s.accountId)?.name ?? '')}</td>
+    <td>${escape(s.startDate)} · ${s.frequency === 'monthly' ? '매월' : '1회'}</td>
+    <td>${escape(s.amount.toLocaleString('ko-KR'))}</td><td>${s.active ?
+      `<form method="post" action="/admin/forecast/disable"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="id" value="${escape(s.id)}"><button>중지</button></form>` : '중지됨'}</td></tr>`).join('');
+  const overrideInputs = schedules.filter(s => s.active).map(s =>
+    `<label>${escape(s.name)} 예상 금액 (원, 음수는 지출)</label>
+    <input name="amount_${escape(s.id)}" value="${escape(overrides[s.id] ?? s.amount)}">`).join('');
+  const eventRows = result.events.map(e => `<tr><td>${escape(e.date)}</td><td>${escape(e.type)}</td>
+    <td>${escape(e.name)}</td><td>${escape(cash.find(a => a.id === e.accountId)?.name ?? '')}</td>
+    <td>${escape(e.amount.toLocaleString('ko-KR'))}</td>
+    <td>${escape(e.projectedBalance.toLocaleString('ko-KR'))}</td></tr>`).join('');
+  return page('현금흐름 예상', `${message}<p>현금성 계좌 합계: 시작 ${result.openingTotal.toLocaleString('ko-KR')}원 →
+    종료 예상 ${result.projectedTotal.toLocaleString('ko-KR')}원</p>
+    <p>예정 거래는 실제 원장에 기록되지 않습니다. 이미 입력한 미래 일자 거래는 별도 확정 거래로 표시됩니다.</p>
+    <h2>조회·임시 시뮬레이션</h2><form method="get" action="/admin/forecast">
+      <label>기준일</label><input type="date" name="asOf" value="${escape(asOf)}" required>
+      <label>종료일 (최대 10년)</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
+      <label>카드 결제 출금 예상 계좌</label><select name="cardCashId"><option value="">카드 예상액 제외</option>
+      ${cashOptions}</select>${overrideInputs}<button>다시 계산</button></form>
+    <h2>예정 거래 추가</h2><form method="post" action="/admin/forecast/schedules">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <label>이름</label><input name="name" required>
+      <label>현금 계좌</label><select name="accountId">${accountOptions}</select>
+      <label>금액 (수입은 양수, 지출은 음수)</label><input name="amountExpression" placeholder="-100000" required>
+      <label>첫 예정일</label><input type="date" name="startDate" required>
+      <label>마지막 예정일 (선택)</label><input type="date" name="endDate">
+      <label>반복</label><select name="frequency"><option value="monthly">매월</option>
+      <option value="once">한 번</option></select><button>예정 거래 저장</button></form>
+    <h2>등록된 예정 거래</h2><table><tr><th>이름</th><th>계좌</th><th>시작·반복</th><th>금액</th><th>상태</th></tr>${scheduleRows}</table>
+    <h2>예상 상세</h2><table><tr><th>날짜</th><th>구분</th><th>내역</th><th>계좌</th>
+    <th>변동</th><th>예상 잔액</th></tr>${eventRows}</table>`);
+}
+
 function sendHtml(res, status, html) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -342,6 +393,25 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/forecast') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      sendHtml(res, 200, renderForecast(book, session, query)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/forecast/schedules', '/admin/forecast/disable'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) {
+        sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
+      }
+      if (pathname.endsWith('disable')) disableSchedule(book, session.sub, form.get('id'));
+      else saveSchedule(book, session.sub, {
+        name: form.get('name'), accountId: form.get('accountId'),
+        amountExpression: form.get('amountExpression'), startDate: form.get('startDate'),
+        endDate: form.get('endDate'), frequency: form.get('frequency'),
+      });
+      sendHtml(res, 200, renderForecast(book, session, new URLSearchParams(),
+        '<p class="notice">예정 거래를 변경했습니다.</p>'));
+      return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/cards') {
       const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
       const throughDate = new URL(req.url, 'http://localhost').searchParams.get('throughDate') ||
