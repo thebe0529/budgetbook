@@ -13,7 +13,7 @@ import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './ca
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
-import { cashMovementsCsv } from './report-export.js';
+import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
@@ -205,6 +205,7 @@ function renderAccountActivity(book, session, accountId, fromDate, throughDate) 
     <td>${escape(line.movement.toLocaleString('ko-KR'))}</td></tr>`).join('');
   return page(`${activity.account.name} 거래 내역`, `<p>기간: ${escape(fromDate)} ~ ${escape(throughDate)} ·
     기간 합계: ${escape(activity.total.toLocaleString('ko-KR'))}원</p>
+    <p><a href="/admin/reports/account.csv?accountId=${encodeURIComponent(accountId)}&fromDate=${encodeURIComponent(fromDate)}&throughDate=${encodeURIComponent(throughDate)}">계정 거래 CSV 다운로드</a></p>
     <p>증감은 계정의 정상잔액 방향으로 표시합니다. 자산·비용은 차변, 부채·자본·수입은 대변이 증가합니다.</p>
     <table><tr><th>일자</th><th>분개 ID</th><th>메모</th><th>차변</th><th>대변</th><th>증감</th></tr>
     ${rows}</table><p><a href="/admin/reports?fromDate=${encodeURIComponent(fromDate)}&throughDate=${encodeURIComponent(throughDate)}">보고서로 돌아가기</a></p>`);
@@ -737,6 +738,16 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const csv = cashMovementsCsv(book, session.sub, fromDate, throughDate);
       res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': `attachment; filename="budgetbook-cash-${fromDate}-${throughDate}.csv"`,
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(csv); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/reports/account.csv') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const fromDate = query.get('fromDate');
+      const throughDate = query.get('throughDate');
+      const csv = accountActivityCsv(book, session.sub, query.get('accountId'), fromDate, throughDate);
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="budgetbook-account-${fromDate}-${throughDate}.csv"`,
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(csv); return true;
     }

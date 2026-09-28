@@ -5,7 +5,7 @@ import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { createLedgerAccount, recordManual } from '../src/manual.js';
 import { accountActivity, detailedReports } from '../src/report-details.js';
-import { cashMovementsCsv } from '../src/report-export.js';
+import { accountActivityCsv, cashMovementsCsv } from '../src/report-export.js';
 import { createImportApi } from '../src/import-api.js';
 
 test('detailed statements reconcile account balances and cash movements including transfers', () => {
@@ -93,5 +93,34 @@ test('cash CSV exports signed movements and protects spreadsheet cells', async (
     const denied = await fetch(url, { headers: { Cookie: 'viewer=1' } });
     assert.equal(denied.status, 400);
     assert.doesNotMatch(await denied.text(), /HYPERLINK/);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('account activity CSV preserves debit and credit lines and owner isolation', async () => {
+  const book = new Book();
+  ensureOwner(book, 'owner');
+  const bank = createLedgerAccount(book, 'owner', { name: '계좌', type: 'asset', cash: true });
+  const income = createLedgerAccount(book, 'owner', { name: '수입', type: 'income' });
+  const expense = createLedgerAccount(book, 'owner', { name: '비용', type: 'expense' });
+  setMember(book, 'owner', 'viewer', 'viewer', [bank.id]);
+  recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-10-02', kind: 'income',
+    accountId: bank.id, counterId: income.id, amountExpression: '20000' });
+  recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-10-03', kind: 'expense',
+    accountId: bank.id, counterId: expense.id, amountExpression: '5000', memo: '+SUM(1)' });
+  const auth = { session: req => ({ sub: req.headers.cookie === 'viewer=1' ? 'viewer' : 'owner',
+    role: req.headers.cookie === 'viewer=1' ? 'viewer' : 'owner', csrf: 'token' }) };
+  const server = createImportApi(book, { auth });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/admin/reports/account.csv?accountId=${bank.id}&fromDate=2026-10-01&throughDate=2026-10-31`;
+  try {
+    const csv = accountActivityCsv(book, 'owner', bank.id, '2026-10-01', '2026-10-31');
+    assert.match(csv, /,20000,"",20000/);
+    assert.match(csv, /,"",5000,-5000/);
+    assert.match(csv, /"'\+SUM\(1\)"/);
+    const response = await fetch(url);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), csv.slice(1));
+    assert.equal((await fetch(url, { headers: { Cookie: 'viewer=1' } })).status, 400);
+    assert.equal((await fetch(url.replace(bank.id, 'missing'))).status, 400);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
