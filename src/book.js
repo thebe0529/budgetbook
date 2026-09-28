@@ -40,7 +40,11 @@ export class Book {
         user_sub TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('owner','editor','viewer')));
       CREATE TABLE IF NOT EXISTS member_accounts (
         user_sub TEXT NOT NULL, account_id TEXT NOT NULL,
-        PRIMARY KEY(user_sub, account_id));`);
+        PRIMARY KEY(user_sub, account_id));
+      CREATE TABLE IF NOT EXISTS entry_revisions (
+        entry_id TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL,
+        actor_sub TEXT NOT NULL, changed_at TEXT NOT NULL,
+        PRIMARY KEY(entry_id, revision));`);
   }
 
   close() { this.db.close(); }

@@ -7,6 +7,8 @@ import { accountOverview, accountRegister, createCategory, createGroup,
   createLedgerAccount, recordManual } from './manual.js';
 import { calculateAmount } from './amount-expression.js';
 import { assertMonth } from './ledger.js';
+import { readFileSync } from 'node:fs';
+import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -76,13 +78,64 @@ function renderRegister(book, session, accountId, message = '') {
       <label>상대 계정</label><select name="counterId">${counters}</select>
       <label>금액 (사칙연산 가능)</label><input name="amountExpression" required placeholder="10000+2500*2">
       <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${categories}</select>
-      <label>메모</label><input name="memo"><button>거래 저장</button></form>`;
-  const rows = register.rows.slice(0, 200).map(row => `<tr><td>${escape(row.date)}</td><td>${escape(row.memo)}</td>
-    <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td></tr>`).join('');
+      <label>메모</label><input name="memo"><button>거래 저장</button></form>
+      <p><a href="/admin/split?accountId=${encodeURIComponent(selected.id)}">여러 행으로 분할 거래 입력</a></p>`;
+  const rows = register.rows.slice(0, 200).map(row => {
+    const editable = row.kind === 'manual-split' && row.sourceAccountId === selected.id &&
+      canAccessAccount(book, session.sub, selected.id, 'write') &&
+      (row.createdBy === session.sub || session.role === 'owner');
+    return `<tr><td>${escape(row.date)}</td><td>${escape(row.memo)}
+      ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}</td>
+    <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td></tr>`;
+  }).join('');
   return page(`${selected.name} 거래`, `${message}<form method="get" action="/admin/register">
     <label>계좌</label><select name="accountId">${options}</select><button>조회</button></form>
     <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원</p>${input}
     <h2>최근 거래</h2><table><tr><th>일자</th><th>메모</th><th>증감</th><th>잔액</th></tr>${rows}</table>`);
+}
+
+function renderSplit(book, session, accountId, entryId = null, message = '') {
+  const account = visibleAccounts(book, session.sub).find(a => a.id === accountId);
+  if (!account || !canAccessAccount(book, session.sub, accountId, 'write')) {
+    throw new Error('Account write access required');
+  }
+  const existing = entryId ? editableManual(book, session.sub, entryId) : null;
+  if (entryId && (!existing || existing.sourceAccountId !== accountId)) {
+    throw new Error('Split transaction cannot be edited');
+  }
+  const kind = existing?.splitKind ?? 'expense';
+  const counters = [...book.accounts().values()].filter(a => ['income', 'expense'].includes(a.type) ||
+    (['asset', 'liability'].includes(a.type) && a.id !== accountId &&
+      canAccessAccount(book, session.sub, a.id, 'write')));
+  const categories = [...book.budgetCategories().values()];
+  const options = selected => counters.map(a => `<option value="${escape(a.id)}" data-type="${a.type}"
+    ${a.id === selected ? 'selected' : ''}>${escape(a.name)} (${a.type})</option>`).join('');
+  const categoryOptions = selected => '<option value="">없음</option>' + categories.map(c =>
+    `<option value="${escape(c.id)}" ${c.id === selected ? 'selected' : ''}>${escape(c.name)}</option>`).join('');
+  const counterLines = existing?.postings.filter(p => p.accountId !== accountId) ?? [null, null];
+  const rows = counterLines.map((line, index) => `<tr><td><select name="counterId">${options(line?.accountId)}</select></td>
+    <td><input name="lineAmount" value="${escape(line?.amount ?? '')}" required></td>
+    <td><select name="lineCategory">${categoryOptions(existing?.budgetAllocations?.[index]?.categoryId)}</select></td>
+    <td><button type="button" data-remove-row>삭제</button></td></tr>`).join('');
+  return page(entryId ? '분할 거래 수정' : '분할 거래 입력', `${message}
+    <p>원천 계좌: ${escape(account.name)} · 상대 계정을 행으로 추가합니다. 각 행의 합계를 원천 계좌에 한 번 반영합니다.</p>
+    <form id="split-form" method="post" action="${entryId ? '/admin/split/update' : '/admin/split'}">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="accountId" value="${escape(accountId)}">
+      ${entryId ? `<input type="hidden" name="entryId" value="${escape(entryId)}">
+        <input type="hidden" name="revision" value="${existing.revision}">` :
+    `<input type="hidden" name="requestId" value="${randomUUID()}">`}
+      <label>일자</label><input type="date" name="date" value="${escape(existing?.date ?? '')}" required>
+      <label>유형</label><select name="kind"><option value="expense" ${kind === 'expense' ? 'selected' : ''}>지출</option>
+      <option value="income" ${kind === 'income' ? 'selected' : ''}>수입</option>
+      <option value="transfer" ${kind === 'transfer' ? 'selected' : ''}>이체·카드 결제</option></select>
+      <label>메모</label><input name="memo" value="${escape(existing?.memo ?? '')}">
+      <table><tr><th>상대 계정</th><th>금액</th><th>예산 카테고리</th><th></th></tr>
+      <tbody id="split-rows">${rows}</tbody></table><button type="button" id="add-split-row">행 추가</button>
+      <button>분할 거래 ${entryId ? '수정' : '저장'}</button>
+    </form><template id="counter-template"><select name="counterId">${options()}</select></template>
+    <template id="category-template"><select name="lineCategory">${categoryOptions()}</select></template>
+    <script defer src="/admin/assets/split.js"></script>`);
 }
 
 function renderReports(book, session, fromDate, throughDate, message = '') {
@@ -127,7 +180,7 @@ function renderBudget(book, session, month, message = '') {
 
 function sendHtml(res, status, html) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
-    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     'X-Content-Type-Options': 'nosniff' });
   res.end(html);
 }
@@ -243,6 +296,42 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/assets/split.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
+      res.end(readFileSync(new URL('./split-ui.js', import.meta.url)));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/split') {
+      const accountId = new URL(req.url, 'http://localhost').searchParams.get('accountId');
+      sendHtml(res, 200, renderSplit(book, session, accountId)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/split/edit') {
+      const entryId = new URL(req.url, 'http://localhost').searchParams.get('entryId');
+      const entry = editableManual(book, session.sub, entryId);
+      if (!entry) throw new Error('Split transaction cannot be edited');
+      sendHtml(res, 200, renderSplit(book, session, entry.sourceAccountId, entryId)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/split', '/admin/split/update'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const ids = form.getAll('counterId');
+      const amounts = form.getAll('lineAmount');
+      const categories = form.getAll('lineCategory');
+      if (ids.length !== amounts.length || (categories.length !== 0 && categories.length !== ids.length)) {
+        throw new Error('Split rows are incomplete');
+      }
+      const input = { date: form.get('date'), kind: form.get('kind'), accountId: form.get('accountId'),
+        memo: form.get('memo') ?? '', requestId: form.get('requestId'),
+        lines: ids.map((counterId, index) => ({ counterId, amountExpression: amounts[index],
+          categoryId: categories[index] || null })) };
+      const result = pathname.endsWith('/update') ?
+        { entry: updateSplitManual(book, session.sub, form.get('entryId'),
+          Number(form.get('revision')), input), duplicate: false } : recordSplitManual(book, session.sub, input);
+      sendHtml(res, 200, renderSplit(book, session, input.accountId, result.entry.id,
+        `<p class="notice">${result.duplicate ? '이미 저장된' : '저장한'} 분할 거래입니다.</p>`));
+      return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/accounts') {
       sendHtml(res, 200, renderAccounts(book, session)); return true;
     }

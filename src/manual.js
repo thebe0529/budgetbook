@@ -64,7 +64,7 @@ export function recordManual(book, userSub, input) {
     amount, memo: memo.trim(), userSub };
   const payloadHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   const entry = { id: `manual:${requestId}`, date, kind: 'manual', memo: payload.memo,
-    createdBy: userSub, payloadHash, postings,
+    createdBy: userSub, sourceAccountId: accountId, revision: 1, payloadHash, postings,
     ...(categoryId ? { budgetAllocations: [{ categoryId, amount }] } : {}) };
   const existing = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entry.id);
   if (existing) {
@@ -95,7 +95,8 @@ export function accountRegister(book, userSub, accountId, throughDate) {
       .reduce((n, p) => n + p.amount * ((p.side === 'debit') === normalDebit ? 1 : -1), 0);
     if (!movement) continue;
     balance += movement;
-    rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance });
+    rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance,
+      kind: entry.kind, sourceAccountId: entry.sourceAccountId, createdBy: entry.createdBy });
   }
   return { account: { id: account.id, name: account.name, type: account.type },
     balance, rows: rows.reverse() };
