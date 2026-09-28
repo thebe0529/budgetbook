@@ -12,6 +12,7 @@ import { editableManual, recordSplitManual, updateSplitManual } from './split-ma
 import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
 import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
+import { accountActivity, detailedReports } from './report-details.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -144,22 +145,57 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
 
 function renderReports(book, session, fromDate, throughDate, message = '') {
   const overview = accountOverview(book, session.sub, throughDate);
-  const rows = overview.map(a => `<tr><td>${escape(a.name)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}</td></tr>`).join('');
+  const rows = overview.map(a => `<tr><td><a href="/admin/register?accountId=${encodeURIComponent(a.id)}">
+    ${escape(a.name)}</a></td><td>${escape(a.balance.toLocaleString('ko-KR'))}</td></tr>`).join('');
   let consolidated = '<p>가족 구성원에게는 허용된 계좌의 잔액만 표시합니다.</p>';
   if (session.role === 'owner') {
-    const report = book.reports(fromDate, throughDate);
-    consolidated = `<h2>장부 전체</h2><p>자산 ${report.balanceSheet.assets.toLocaleString('ko-KR')}원 ·
-      부채 ${report.balanceSheet.liabilities.toLocaleString('ko-KR')}원 ·
-      순자산 ${report.balanceSheet.netWorth.toLocaleString('ko-KR')}원</p>
-      <p>기간 수입 ${report.incomeStatement.income.toLocaleString('ko-KR')}원 ·
-      비용 ${report.incomeStatement.expenses.toLocaleString('ko-KR')}원 ·
-      순손익 ${report.incomeStatement.result.toLocaleString('ko-KR')}원 ·
-      현금 증감 ${report.cashFlow.netChange.toLocaleString('ko-KR')}원</p>`;
+    const detail = detailedReports(book, session.sub, fromDate, throughDate);
+    const { balanceSheet: bs, incomeStatement: income } = detail.summary;
+    const money = value => escape(value.toLocaleString('ko-KR'));
+    const link = id => `/admin/reports/account?accountId=${encodeURIComponent(id)}&fromDate=${encodeURIComponent(fromDate)}&throughDate=${encodeURIComponent(throughDate)}`;
+    const positionRows = detail.positions.map(a => `<tr><td>${escape(a.type)}</td><td>${escape(a.group)}</td>
+      <td><a href="/admin/reports/account?accountId=${encodeURIComponent(a.id)}&fromDate=0001-01-01&throughDate=${encodeURIComponent(throughDate)}">${escape(a.name)}</a></td><td>${money(a.amount)}</td></tr>`).join('');
+    const performanceRows = detail.performance.map(a => `<tr><td>${escape(a.type)}</td>
+      <td><a href="${link(a.id)}">${escape(a.name)}</a></td><td>${money(a.amount)}</td></tr>`).join('');
+    const cashRows = detail.cashRows.map(a => `<tr><td><a href="${link(a.id)}">${escape(a.name)}</a></td>
+      <td>${money(a.opening)}</td><td>${money(a.receipts)}</td><td>${money(a.payments)}</td>
+      <td>${money(a.closing)}</td></tr>`).join('');
+    const movements = detail.cashMovements.map(m => `<tr><td>${escape(m.date)}</td>
+      <td><a href="${link(m.accountId)}">${escape(book.accounts().get(m.accountId)?.name ?? '')}</a></td>
+      <td>${escape(m.memo)}</td><td>${money(m.amount)}</td></tr>`).join('');
+    consolidated = `<h2>재무상태표 · ${escape(throughDate)}</h2>
+      <table><tr><th>유형</th><th>계좌 그룹</th><th>계정</th><th>잔액</th></tr>${positionRows}</table>
+      <p>자산 ${money(bs.assets)}원 · 부채 ${money(bs.liabilities)}원 · 순자산 ${money(bs.netWorth)}원<br>
+      기초자본 ${money(bs.equity)}원 + 누적 손익 ${money(bs.retainedResult)}원 = 순자산 ${money(bs.netWorth)}원</p>
+      <h2>손익계산서 · ${escape(fromDate)} ~ ${escape(throughDate)}</h2>
+      <table><tr><th>유형</th><th>계정</th><th>기간 금액</th></tr>${performanceRows}</table>
+      <p>수입 ${money(income.income)}원 − 비용 ${money(income.expenses)}원 = 순손익 ${money(income.result)}원</p>
+      <h2>현금흐름 내역 · ${escape(fromDate)} ~ ${escape(throughDate)}</h2>
+      <p>현금성 계좌의 기간 입출금을 표시합니다. 현금성 계좌 사이의 이체는 양쪽 계좌에 나타나지만 합계의 순변동은 0원입니다.</p>
+      <table><tr><th>계좌</th><th>기초</th><th>입금</th><th>출금</th><th>기말</th></tr>${cashRows}
+      <tr><th>합계</th><th>${money(detail.cashTotals.opening)}</th><th>${money(detail.cashTotals.receipts)}</th>
+      <th>${money(detail.cashTotals.payments)}</th><th>${money(detail.cashTotals.closing)}</th></tr></table>
+      <p>현금 순증감 ${money(detail.summary.cashFlow.netChange)}원</p>
+      <details><summary>현금 입출금 원거래 전체 보기</summary>
+      <table><tr><th>일자</th><th>계좌</th><th>메모</th><th>증감</th></tr>${movements}</table></details>`;
   }
   return page('보고서', `${message}<form method="get" action="/admin/reports">
     <label>시작일</label><input type="date" name="fromDate" value="${escape(fromDate)}">
     <label>기준일</label><input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
     <h2>접근 가능한 계좌 잔액</h2><table><tr><th>계좌</th><th>잔액</th></tr>${rows}</table>${consolidated}`);
+}
+
+function renderAccountActivity(book, session, accountId, fromDate, throughDate) {
+  const activity = accountActivity(book, session.sub, accountId, fromDate, throughDate);
+  const rows = activity.lines.map(line => `<tr><td>${escape(line.date)}</td><td>${escape(line.entryId)}</td>
+    <td>${escape(line.memo)}</td><td>${line.side === 'debit' ? escape(line.amount.toLocaleString('ko-KR')) : ''}</td>
+    <td>${line.side === 'credit' ? escape(line.amount.toLocaleString('ko-KR')) : ''}</td>
+    <td>${escape(line.movement.toLocaleString('ko-KR'))}</td></tr>`).join('');
+  return page(`${activity.account.name} 거래 내역`, `<p>기간: ${escape(fromDate)} ~ ${escape(throughDate)} ·
+    기간 합계: ${escape(activity.total.toLocaleString('ko-KR'))}원</p>
+    <p>증감은 계정의 정상잔액 방향으로 표시합니다. 자산·비용은 차변, 부채·자본·수입은 대변이 증가합니다.</p>
+    <table><tr><th>일자</th><th>분개 ID</th><th>메모</th><th>차변</th><th>대변</th><th>증감</th></tr>
+    ${rows}</table><p><a href="/admin/reports?fromDate=${encodeURIComponent(fromDate)}&throughDate=${encodeURIComponent(throughDate)}">보고서로 돌아가기</a></p>`);
 }
 
 function renderBudget(book, session, month, message = '') {
@@ -533,6 +569,11 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const fromDate = query.get('fromDate') || `${today.slice(0, 7)}-01`;
       const throughDate = query.get('throughDate') || today;
       sendHtml(res, 200, renderReports(book, session, fromDate, throughDate)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/reports/account') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      sendHtml(res, 200, renderAccountActivity(book, session, query.get('accountId'),
+        query.get('fromDate'), query.get('throughDate'))); return true;
     }
     if (req.method === 'GET' && pathname === '/admin/budget') {
       const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
