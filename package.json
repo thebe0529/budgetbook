@@ -4,5 +4,9 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=24" },
-  "scripts": { "test": "node --test" }
+  "scripts": {
+    "test": "node --test",
+    "import-api": "node bin/import-server.js",
+    "import-channel": "node bin/import-channel.js"
+  }
 }

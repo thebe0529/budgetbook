@@ -15,6 +15,13 @@ export class Book {
       CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS adjustment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS import_channels (
+        id TEXT PRIMARY KEY, account_id TEXT NOT NULL, token_hash TEXT NOT NULL,
+        name TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS import_events (
+        id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+        external_id TEXT, payload_hash TEXT NOT NULL, data TEXT NOT NULL,
+        UNIQUE(channel_id, idempotency_key), UNIQUE(channel_id, external_id));`);
   }
 
   close() { this.db.close(); }
