@@ -1,0 +1,39 @@
+services:
+  budgetbook:
+    build: .
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:${BUDGETBOOK_PUBLIC_PORT:-38181}:38181"
+    environment:
+      BUDGETBOOK_HOST: 0.0.0.0
+      BUDGETBOOK_PORT: "38181"
+      BUDGETBOOK_DB: /data/budget.sqlite
+      BUDGETBOOK_BACKUP_DIR: /backups
+      BUDGETBOOK_OIDC_ISSUER: ${BUDGETBOOK_OIDC_ISSUER:?set Pocket ID issuer}
+      BUDGETBOOK_OIDC_CLIENT_ID: ${BUDGETBOOK_OIDC_CLIENT_ID:?set OIDC client ID}
+      BUDGETBOOK_OIDC_CLIENT_SECRET: ${BUDGETBOOK_OIDC_CLIENT_SECRET:?set OIDC client secret}
+      BUDGETBOOK_OIDC_REDIRECT_URI: ${BUDGETBOOK_OIDC_REDIRECT_URI:?set HTTPS callback URL}
+      BUDGETBOOK_OWNER_SUB: ${BUDGETBOOK_OWNER_SUB:?set Pocket ID owner subject}
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+      - type: bind
+        source: ./backups
+        target: /backups
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:38181/healthz').then(r=>process.exit(r.status===204?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s

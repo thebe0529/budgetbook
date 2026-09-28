@@ -35,3 +35,5 @@ SQLite 기반 복식부기 원장, 카드 할부 예정액·결제 처리, 일�
 ## 로컬 테스트
 
 Node.js 24 이상에서 `npm ci` 후 `npm test`를 실행합니다. 코드 구조와 범위는 [첫 구현 안내](docs/implementation.md), Pocket ID와 정규식 설정 및 수신 방법은 [API 안내](docs/import-api.md)를 참고하세요.
+
+NAS에 Docker로 실행하는 절차는 [NAS 배포 안내](docs/nas-deployment.md)를 참고하세요.

@@ -4,7 +4,7 @@ import { createOidcAuth } from '../src/oidc-auth.js';
 import { createBackupManager, startBackupScheduler } from '../src/backups.js';
 
 const filename = process.env.BUDGETBOOK_DB;
-if (!filename) throw new Error('BUDGETBOOK_DB must point to an existing configured ledger database');
+if (!filename) throw new Error('BUDGETBOOK_DB must point to a persistent writable SQLite path');
 const book = new Book(filename);
 const backupDirectory = process.env.BUDGETBOOK_BACKUP_DIR;
 if (backupDirectory) book.backupManager = createBackupManager(book, backupDirectory);

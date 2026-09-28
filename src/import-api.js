@@ -24,6 +24,13 @@ async function readBody(req) {
 export function createImportApi(book, { auth } = {}) {
   return createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/healthz' && req.method === 'GET') {
+      try {
+        book.db.prepare('SELECT 1').get();
+        res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end();
+      } catch { json(res, 503, { error: 'Unavailable' }); }
+      return;
+    }
     if (auth) {
       try { if (await handleAdmin(book, auth, req, res, pathname)) return; }
       catch { return json(res, 503, { error: 'Login temporarily unavailable' }); }

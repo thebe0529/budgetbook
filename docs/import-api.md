@@ -46,6 +46,6 @@ Pocket ID에 기밀 OIDC 클라이언트를 만들고 PKCE를 활성화합니다
 ## 남은 범위
 
 - 가족별 독립 장부와 개인 계좌의 보고서 격리, 유사 거래 매칭, 분할/할부 승인 흐름.
-- NAS Docker Compose, HTTPS 프록시, Google Drive 백업 연동.
+- Google Drive 백업 연동. NAS Docker Compose 예시는 [NAS 배포 안내](nas-deployment.md)에 있습니다.
 
 OIDC 흐름은 라이브러리의 PKCE·state·nonce 및 ID 토큰 검증을 사용하지만, 실제 Pocket ID 서버와의 통합 테스트는 배포 환경에서 해야 합니다. 현재는 하나의 공유 장부에서 계좌별 접근 권한을 적용합니다. 개인 전용 계좌가 재무제표와 예산 집계까지 완전히 분리되는 기능은 아직 없어 민감한 개인 계좌를 가족 장부에 등록하지 않아야 합니다.
