@@ -10,7 +10,8 @@ import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
 import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
-import { disableSchedule, forecast, listSchedules, saveSchedule } from './forecast.js';
+import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
+  matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -243,16 +244,49 @@ function renderForecast(book, session, query, message = '') {
   const scheduleRows = schedules.map(s => `<tr><td>${escape(s.name)}</td>
     <td>${escape(cash.find(a => a.id === s.accountId)?.name ?? '')}</td>
     <td>${escape(s.startDate)} · ${s.frequency === 'monthly' ? '매월' : '1회'}</td>
-    <td>${escape(s.amount.toLocaleString('ko-KR'))}</td><td>${s.active ?
+    <td>${escape(s.amount.toLocaleString('ko-KR'))}</td><td><details><summary>수정</summary>
+      <form method="post" action="/admin/forecast/schedules">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="id" value="${escape(s.id)}">
+      <label>이름</label><input name="name" value="${escape(s.name)}" required>
+      <label>현금 계좌</label><select name="accountId">${cash.map(a =>
+    `<option value="${escape(a.id)}" ${s.accountId === a.id ? 'selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
+      <label>금액</label><input name="amountExpression" value="${escape(s.amount)}" required>
+      <label>첫 예정일</label><input type="date" name="startDate" value="${escape(s.startDate)}" required>
+      <label>마지막 예정일</label><input type="date" name="endDate" value="${escape(s.endDate ?? '')}">
+      <label>반복</label><select name="frequency"><option value="monthly" ${s.frequency === 'monthly' ? 'selected' : ''}>매월</option>
+      <option value="once" ${s.frequency === 'once' ? 'selected' : ''}>한 번</option></select>
+      <button>수정 저장</button></form></details>${s.active ?
       `<form method="post" action="/admin/forecast/disable"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="id" value="${escape(s.id)}"><button>중지</button></form>` : '중지됨'}</td></tr>`).join('');
   const overrideInputs = schedules.filter(s => s.active).map(s =>
     `<label>${escape(s.name)} 예상 금액 (원, 음수는 지출)</label>
     <input name="amount_${escape(s.id)}" value="${escape(overrides[s.id] ?? s.amount)}">`).join('');
-  const eventRows = result.events.map(e => `<tr><td>${escape(e.date)}</td><td>${escape(e.type)}</td>
+  const eventRows = result.events.map(e => {
+    const candidates = e.scheduleId ? matchingEntries(book, session.sub, e.scheduleId, e.date) : [];
+    const link = candidates.length ? `<form method="post" action="/admin/forecast/link">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="scheduleId" value="${escape(e.scheduleId)}">
+      <input type="hidden" name="date" value="${escape(e.date)}">
+      <input type="hidden" name="asOf" value="${escape(asOf)}">
+      <input type="hidden" name="throughDate" value="${escape(throughDate)}">
+      <input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
+      <select name="entryId">${candidates.map(entry => `<option value="${escape(entry.id)}">
+      ${escape(entry.date)} ${escape(entry.memo ?? entry.id)}</option>`).join('')}</select>
+      <button>실제 거래 연결</button></form>` : '';
+    return `<tr><td>${escape(e.date)}</td><td>${escape(e.type)}</td>
     <td>${escape(e.name)}</td><td>${escape(cash.find(a => a.id === e.accountId)?.name ?? '')}</td>
     <td>${escape(e.amount.toLocaleString('ko-KR'))}</td>
-    <td>${escape(e.projectedBalance.toLocaleString('ko-KR'))}</td></tr>`).join('');
+    <td>${escape(e.projectedBalance.toLocaleString('ko-KR'))}${link}</td></tr>`;
+  }).join('');
+  const linkedRows = linkedOccurrences(book, session.sub).map(row => `<tr>
+    <td>${escape(schedules.find(s => s.id === row.schedule_id)?.name ?? '')}</td>
+    <td>${escape(row.occurrence_date)}</td><td>${escape(row.entry_id)}</td>
+    <td><form method="post" action="/admin/forecast/unlink">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="scheduleId" value="${escape(row.schedule_id)}">
+      <input type="hidden" name="date" value="${escape(row.occurrence_date)}"><button>연결 해제</button>
+    </form></td></tr>`).join('');
   return page('현금흐름 예상', `${message}<p>현금성 계좌 합계: 시작 ${result.openingTotal.toLocaleString('ko-KR')}원 →
     종료 예상 ${result.projectedTotal.toLocaleString('ko-KR')}원</p>
     <p>예정 거래는 실제 원장에 기록되지 않습니다. 이미 입력한 미래 일자 거래는 별도 확정 거래로 표시됩니다.</p>
@@ -272,7 +306,9 @@ function renderForecast(book, session, query, message = '') {
       <option value="once">한 번</option></select><button>예정 거래 저장</button></form>
     <h2>등록된 예정 거래</h2><table><tr><th>이름</th><th>계좌</th><th>시작·반복</th><th>금액</th><th>상태</th></tr>${scheduleRows}</table>
     <h2>예상 상세</h2><table><tr><th>날짜</th><th>구분</th><th>내역</th><th>계좌</th>
-    <th>변동</th><th>예상 잔액</th></tr>${eventRows}</table>`);
+    <th>변동</th><th>예상 잔액·연결</th></tr>${eventRows}</table>
+    <h2>실제 거래 연결 내역</h2><table><tr><th>예정 거래</th><th>회차 예정일</th>
+    <th>원장 거래 ID</th><th>관리</th></tr>${linkedRows}</table>`);
 }
 
 function sendHtml(res, status, html) {
@@ -397,18 +433,28 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const query = new URL(req.url, 'http://localhost').searchParams;
       sendHtml(res, 200, renderForecast(book, session, query)); return true;
     }
-    if (req.method === 'POST' && ['/admin/forecast/schedules', '/admin/forecast/disable'].includes(pathname)) {
+    if (req.method === 'POST' && ['/admin/forecast/schedules', '/admin/forecast/disable',
+      '/admin/forecast/link', '/admin/forecast/unlink'].includes(pathname)) {
       const form = await formBody(req);
       if (form.get('csrf') !== session.csrf) {
         sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
       }
       if (pathname.endsWith('disable')) disableSchedule(book, session.sub, form.get('id'));
+      else if (pathname.endsWith('unlink')) unlinkOccurrence(book, session.sub, {
+        scheduleId: form.get('scheduleId'), date: form.get('date'),
+      });
+      else if (pathname.endsWith('link')) linkOccurrence(book, session.sub, {
+        scheduleId: form.get('scheduleId'), date: form.get('date'), entryId: form.get('entryId'),
+      });
       else saveSchedule(book, session.sub, {
-        name: form.get('name'), accountId: form.get('accountId'),
+        id: form.get('id') || null, name: form.get('name'), accountId: form.get('accountId'),
         amountExpression: form.get('amountExpression'), startDate: form.get('startDate'),
         endDate: form.get('endDate'), frequency: form.get('frequency'),
       });
-      sendHtml(res, 200, renderForecast(book, session, new URLSearchParams(),
+      sendHtml(res, 200, renderForecast(book, session, new URLSearchParams({
+        asOf: form.get('asOf') || '', throughDate: form.get('throughDate') || '',
+        cardCashId: form.get('cardCashId') || '',
+      }),
         '<p class="notice">예정 거래를 변경했습니다.</p>'));
       return true;
     }

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { createLedgerAccount, recordManual } from '../src/manual.js';
-import { disableSchedule, forecast, saveSchedule } from '../src/forecast.js';
+import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, matchingEntries,
+  saveSchedule, unlinkOccurrence } from '../src/forecast.js';
 import { recordCardPurchase } from '../src/card-manual.js';
 import { createImportApi } from '../src/import-api.js';
 import { randomUUID } from 'node:crypto';
@@ -48,10 +49,48 @@ test('cash forecast combines monthly schedules, unpaid cards and posted future c
   } finally { book.close(); }
 });
 
+test('linked actual cash movement replaces only its schedule occurrence', () => {
+  const book = new Book();
+  try {
+    ensureOwner(book, 'owner');
+    const cash = createLedgerAccount(book, 'owner', { name: '은행', type: 'asset', cash: true });
+    const otherCash = createLedgerAccount(book, 'owner', { name: '다른 은행', type: 'asset', cash: true });
+    const income = createLedgerAccount(book, 'owner', { name: '급여', type: 'income' });
+    const schedule = saveSchedule(book, 'owner', { accountId: cash.id, name: '급여',
+      amountExpression: '20000', startDate: '2026-11-25', frequency: 'monthly' });
+    const entry = recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-11-26',
+      kind: 'income', accountId: cash.id, counterId: income.id, amountExpression: '20000' }).entry;
+    const wrong = recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-11-26',
+      kind: 'income', accountId: otherCash.id, counterId: income.id, amountExpression: '20000' }).entry;
+    const args = { asOf: '2026-11-01', throughDate: '2026-12-31' };
+    assert.equal(forecast(book, 'owner', args).projectedTotal, 80000);
+    assert.throws(() => linkOccurrence(book, 'owner', { scheduleId: schedule.id,
+      date: '2026-11-25', entryId: wrong.id }), /does not match/);
+    assert.deepEqual(matchingEntries(book, 'owner', schedule.id, '2026-11-25').map(e => e.id), [entry.id]);
+    linkOccurrence(book, 'owner', { scheduleId: schedule.id, date: '2026-11-25', entryId: entry.id });
+    assert.equal(forecast(book, 'owner', args).projectedTotal, 60000);
+    assert.equal(forecast(book, 'owner', args).events.filter(e => e.type === 'schedule').length, 1);
+    assert.equal(linkedOccurrences(book, 'owner').length, 1);
+    assert.throws(() => linkOccurrence(book, 'owner', { scheduleId: schedule.id,
+      date: '2026-12-25', entryId: entry.id }), /UNIQUE/);
+    const changed = saveSchedule(book, 'owner', { id: schedule.id, accountId: cash.id,
+      name: '급여 인상', amountExpression: '25000', startDate: '2026-11-25', frequency: 'monthly' });
+    assert.equal(changed.id, schedule.id);
+    assert.equal(forecast(book, 'owner', args).projectedTotal, 90000);
+    unlinkOccurrence(book, 'owner', { scheduleId: schedule.id, date: '2026-11-25' });
+    assert.equal(linkedOccurrences(book, 'owner').length, 0);
+  } finally { book.close(); }
+});
+
 test('forecast page respects owner role and CSRF', async () => {
   const book = new Book();
   ensureOwner(book, 'owner');
   const cash = createLedgerAccount(book, 'owner', { name: '은행', type: 'asset', cash: true });
+  const income = createLedgerAccount(book, 'owner', { name: '급여', type: 'income' });
+  const actual = recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-11-26',
+    kind: 'income', accountId: cash.id, counterId: income.id, amountExpression: '20000' }).entry;
+  const schedule = saveSchedule(book, 'owner', { accountId: cash.id, name: '월급',
+    amountExpression: '20000', startDate: '2026-11-25', frequency: 'monthly' });
   setMember(book, 'owner', 'viewer', 'viewer', [cash.id]);
   const auth = { session: req => ({ sub: req.headers.cookie === 'viewer=1' ? 'viewer' : 'owner',
     role: req.headers.cookie === 'viewer=1' ? 'viewer' : 'owner', csrf: 'token' }) };
@@ -68,5 +107,16 @@ test('forecast page respects owner role and CSRF', async () => {
     const invalid = await fetch(`${url}/admin/forecast/schedules`, { method: 'POST',
       body: new URLSearchParams({ csrf: 'wrong' }) });
     assert.equal(invalid.status, 403);
+    const body = new URLSearchParams({ csrf: 'token', scheduleId: schedule.id,
+      date: '2026-11-25', entryId: actual.id, asOf: '2026-11-01',
+      throughDate: '2026-12-31' });
+    const linked = await fetch(`${url}/admin/forecast/link`, { method: 'POST', body });
+    assert.equal(linked.status, 200);
+    assert.match(await linked.text(), /연결 해제/);
+    assert.equal(linkedOccurrences(book, 'owner').length, 1);
+    const unlinked = await fetch(`${url}/admin/forecast/unlink`, { method: 'POST',
+      body: new URLSearchParams({ csrf: 'token', scheduleId: schedule.id, date: '2026-11-25' }) });
+    assert.equal(unlinked.status, 200);
+    assert.equal(linkedOccurrences(book, 'owner').length, 0);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });

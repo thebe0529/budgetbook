@@ -30,10 +30,61 @@ export function saveSchedule(book, sub, input) {
   const previous = book.db.prepare('SELECT 1 FROM cash_schedules WHERE id = ?').get(id);
   if (input.id && !previous) throw new Error('Unknown cash schedule');
   const schedule = { id, accountId, name: name.trim(), startDate,
-    endDate: endDate || null, frequency, amount, active: true };
+    endDate: endDate || null, frequency, amount, active: previous ?
+      JSON.parse(book.db.prepare('SELECT data FROM cash_schedules WHERE id = ?').get(id).data).active : true };
   book.db.prepare(`INSERT INTO cash_schedules (id, data) VALUES (?, ?)
     ON CONFLICT(id) DO UPDATE SET data = excluded.data`).run(id, JSON.stringify(schedule));
   return schedule;
+}
+
+function occurrence(schedule, date) {
+  assertDate(date);
+  if (date < schedule.startDate || schedule.endDate && date > schedule.endDate) return false;
+  if (schedule.frequency === 'once') return date === schedule.startDate;
+  const [year, month] = date.split('-').map(Number);
+  const [startYear, startMonth] = schedule.startDate.split('-').map(Number);
+  const offset = (year - startYear) * 12 + month - startMonth;
+  return offset >= 0 && addMonths(schedule.startDate, offset) === date;
+}
+
+function cashMovement(entry, accountId) {
+  return entry.postings.filter(p => p.accountId === accountId)
+    .reduce((sum, p) => sum + (p.side === 'debit' ? p.amount : -p.amount), 0);
+}
+
+function matches(schedule, date, entry) {
+  const distance = Math.abs(Date.parse(`${entry.date}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`));
+  return distance <= 31 * 86400000 && cashMovement(entry, schedule.accountId) === schedule.amount;
+}
+
+export function linkedOccurrences(book, sub) {
+  owner(book, sub);
+  return book.db.prepare('SELECT schedule_id, occurrence_date, entry_id FROM cash_schedule_links').all();
+}
+
+export function linkOccurrence(book, sub, { scheduleId, date, entryId }) {
+  owner(book, sub);
+  const schedule = listSchedules(book, sub).find(s => s.id === scheduleId);
+  if (!schedule || !occurrence(schedule, date)) throw new Error('Unknown schedule occurrence');
+  const entry = book.entries().find(e => e.id === entryId);
+  if (!entry || !matches(schedule, date, entry)) throw new Error('Actual cash movement does not match schedule');
+  book.db.prepare(`INSERT INTO cash_schedule_links (schedule_id, occurrence_date, entry_id, linked_at)
+    VALUES (?, ?, ?, ?)`).run(scheduleId, date, entryId, new Date().toISOString());
+}
+
+export function unlinkOccurrence(book, sub, { scheduleId, date }) {
+  owner(book, sub);
+  assertDate(date);
+  if (book.db.prepare('DELETE FROM cash_schedule_links WHERE schedule_id = ? AND occurrence_date = ?')
+    .run(scheduleId, date).changes !== 1) throw new Error('Unknown schedule link');
+}
+
+export function matchingEntries(book, sub, scheduleId, date) {
+  owner(book, sub);
+  const schedule = listSchedules(book, sub).find(s => s.id === scheduleId);
+  if (!schedule || !occurrence(schedule, date)) throw new Error('Unknown schedule occurrence');
+  const used = new Set(linkedOccurrences(book, sub).map(link => link.entry_id));
+  return book.entries().filter(entry => !used.has(entry.id) && matches(schedule, date, entry));
 }
 
 export function disableSchedule(book, sub, id) {
@@ -55,17 +106,26 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, overrides =
   const cash = [...accounts.values()].filter(a => a.cash);
   if (cardCashId && !cash.some(a => a.id === cardCashId)) throw new Error('Invalid card payment account');
   const schedules = listSchedules(book, sub).filter(s => s.active);
+  const entries = book.entries();
+  const linked = new Set(linkedOccurrences(book, sub).filter(row => {
+    const schedule = schedules.find(s => s.id === row.schedule_id);
+    const entry = entries.find(e => e.id === row.entry_id);
+    return schedule && entry && occurrence(schedule, row.occurrence_date) &&
+      matches(schedule, row.occurrence_date, entry);
+  }).map(row => `${row.schedule_id}:${row.occurrence_date}`));
   if (Object.keys(overrides).some(id => !schedules.some(s => s.id === id))) {
     throw new Error('Unknown simulation schedule');
   }
   const events = [];
-  const append = (date, type, name, amount, accountId) => {
-    if (date > asOf && date <= throughDate) events.push({ date, type, name, amount, accountId });
+  const append = (date, type, name, amount, accountId, scheduleId) => {
+    if (date > asOf && date <= throughDate) events.push({ date, type, name, amount, accountId,
+      ...(scheduleId ? { scheduleId } : {}) });
   };
   for (const s of schedules) {
     const amount = overrides[s.id] === undefined ? s.amount : calculateAmount(overrides[s.id]);
     if (s.frequency === 'once') {
-      if (!s.endDate || s.startDate <= s.endDate) append(s.startDate, 'schedule', s.name, amount, s.accountId);
+      if ((!s.endDate || s.startDate <= s.endDate) &&
+        !linked.has(`${s.id}:${s.startDate}`)) append(s.startDate, 'schedule', s.name, amount, s.accountId, s.id);
     } else {
       const [startYear, startMonth] = s.startDate.split('-').map(Number);
       const [currentYear, currentMonth] = asOf.split('-').map(Number);
@@ -73,22 +133,21 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, overrides =
       for (let i = first; i < first + 123; i++) {
         const date = addMonths(s.startDate, i);
         if (date > throughDate || s.endDate && date > s.endDate) break;
-        append(date, 'schedule', s.name, amount, s.accountId);
+        if (!linked.has(`${s.id}:${date}`)) append(date, 'schedule', s.name, amount, s.accountId, s.id);
       }
     }
   }
   if (cardCashId) for (const p of book.pendingCardPayments(throughDate)) {
     append(p.dueDate, 'card', `${accounts.get(p.cardId)?.name ?? '카드'} ${p.index}회차`, -p.amount, cardCashId);
   }
-  for (const entry of book.entries()) {
+  for (const entry of entries) {
     if (entry.date <= asOf || entry.date > throughDate) continue;
     for (const a of cash) {
-      const amount = entry.postings.filter(p => p.accountId === a.id)
-        .reduce((sum, p) => sum + (p.side === 'debit' ? p.amount : -p.amount), 0);
+      const amount = cashMovement(entry, a.id);
       if (amount) append(entry.date, 'booked', entry.memo || entry.id, amount, a.id);
     }
   }
-  const current = balances(accounts, book.entries(), asOf);
+  const current = balances(accounts, entries, asOf);
   const opening = Object.fromEntries(cash.map(a => [a.id, current[a.id]]));
   const projected = { ...opening };
   events.sort((a, b) => a.date.localeCompare(b.date) || a.type.localeCompare(b.type));
