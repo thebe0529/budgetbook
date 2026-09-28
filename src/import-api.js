@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { authenticateImportChannel, getImportEvent, receiveImport } from './imports.js';
+import { getImportEvent } from './imports.js';
 import { identifyPushOwner, receivePush } from './push-credentials.js';
 import { handleAdmin } from './admin-ui.js';
 
@@ -58,29 +58,6 @@ export function createImportApi(book, { auth } = {}) {
       const event = getImportEvent(book, { id: `push:${owner.keyId}` }, pushId);
       return event ? json(res, 200, event) : json(res, 404, { error: 'Not found' });
     }
-    const channel = authenticateImportChannel(book, match?.[1]);
-    if (!channel) return json(res, 401, { error: 'Unauthorized' });
-    try {
-      if (req.method === 'POST' && pathname === '/api/v1/import-events') {
-        if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) {
-          return json(res, 415, { error: 'Content-Type must be application/json' });
-        }
-        const { event, duplicate } = receiveImport(book, channel, await readBody(req),
-          req.headers['idempotency-key']);
-        return json(res, duplicate ? 200 : 202,
-          { id: event.id, status: event.status, duplicate }, { Location: `/api/v1/import-events/${event.id}` });
-      }
-      const eventId = /^\/api\/v1\/import-events\/([0-9a-f-]{36})$/.exec(pathname)?.[1];
-      if (req.method === 'GET' && eventId) {
-        const event = getImportEvent(book, channel, eventId);
-        return event ? json(res, 200, event) : json(res, 404, { error: 'Not found' });
-      }
-      return json(res, 404, { error: 'Not found' });
-    } catch (error) {
-      if (error.message === 'Duplicate key with different payload') return json(res, 409, { error: error.message });
-      if (['Valid Idempotency-Key required', 'rawText and optional externalId required',
-        'Request body too large', 'Invalid JSON'].includes(error.message)) return json(res, 400, { error: error.message });
-      return json(res, 500, { error: 'Internal server error' });
-    }
+    return json(res, 404, { error: 'Not found' });
   });
 }

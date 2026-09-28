@@ -1,12 +1,15 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { validatePatterns, parsePush } from './push-parser.js';
 import { receiveImport } from './imports.js';
+import { canAccessAccount, member } from './members.js';
 
 const digest = secret => createHash('sha256').update(secret).digest('hex');
 const randomKey = () => randomBytes(32).toString('base64url');
 
 export function issueApiKey(book, userSub) {
-  if (!userSub || typeof userSub !== 'string') throw new Error('User subject is required');
+  if (!userSub || !['owner', 'editor'].includes(member(book, userSub)?.role)) {
+    throw new Error('Editor membership required');
+  }
   const id = randomUUID();
   const key = randomKey();
   book.db.prepare('INSERT INTO user_api_keys (id, user_sub, token_hash) VALUES (?, ?, ?)')
@@ -15,7 +18,7 @@ export function issueApiKey(book, userSub) {
 }
 
 export function issueAccountKey(book, userSub, accountId) {
-  if (!userSub || !book.accounts().has(accountId)) throw new Error('Unknown user or account');
+  if (!canAccessAccount(book, userSub, accountId, 'write')) throw new Error('Account write permission required');
   const id = randomUUID();
   const key = randomKey();
   book.db.prepare('INSERT INTO account_keys (id, user_sub, account_id, token_hash) VALUES (?, ?, ?, ?)')
@@ -35,12 +38,13 @@ function matchSecret(book, table, key) {
 export function identifyPushOwner(book, apiKey, accountKey) {
   const user = matchSecret(book, 'user_api_keys', apiKey);
   const account = matchSecret(book, 'account_keys', accountKey);
-  return user && account?.user_sub === user.user_sub ?
+  return user && account?.user_sub === user.user_sub &&
+    canAccessAccount(book, user.user_sub, account.account_id, 'write') ?
     { userSub: user.user_sub, accountId: account.account_id, keyId: account.id } : null;
 }
 
 export function saveParserRules(book, userSub, accountId, patterns) {
-  if (!userSub || !book.accounts().has(accountId)) throw new Error('Unknown user or account');
+  if (!canAccessAccount(book, userSub, accountId, 'write')) throw new Error('Account write permission required');
   validatePatterns(patterns);
   book.db.prepare(`INSERT INTO parser_rules (user_sub, account_id, patterns) VALUES (?, ?, ?)
     ON CONFLICT(user_sub, account_id) DO UPDATE SET patterns=excluded.patterns`)

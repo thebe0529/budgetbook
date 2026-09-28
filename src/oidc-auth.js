@@ -1,5 +1,6 @@
 import * as oidc from 'openid-client';
 import { createHash, randomBytes } from 'node:crypto';
+import { ensureOwner, member } from './members.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
@@ -14,6 +15,7 @@ export function createOidcAuth(book, { issuer, clientId, clientSecret, redirectU
   if (redirect.protocol !== 'https:' && redirect.hostname !== 'localhost' && redirect.hostname !== '127.0.0.1') {
     throw new Error('OIDC redirect must use HTTPS');
   }
+  ensureOwner(book, ownerSub);
   let configuration;
   const config = () => configuration ??= oidc.discovery(new URL(issuer), clientId, clientSecret);
   const secure = redirect.protocol === 'https:' ? '; Secure' : '';
@@ -47,7 +49,7 @@ export function createOidcAuth(book, { issuer, clientId, clientSecret, redirectU
         pkceCodeVerifier: pending.verifier, expectedState: state,
         expectedNonce: pending.nonce, idTokenExpected: true });
       const sub = tokens.claims()?.sub;
-      if (!sub || sub !== ownerSub) throw new Error('User is not authorized for this book');
+      if (!sub || !member(book, sub)) throw new Error('User is not authorized for this book');
       const token = secret();
       book.db.prepare(`INSERT INTO user_sessions (token_hash, user_sub, csrf, expires_at)
         VALUES (?, ?, ?, ?)`).run(hash(token), sub, secret(), Date.now() + 12 * 60 * 60 * 1000);
@@ -60,8 +62,9 @@ export function createOidcAuth(book, { issuer, clientId, clientSecret, redirectU
       const value = cookieValue(req, 'bb_session');
       if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) return null;
       const session = book.db.prepare('SELECT * FROM user_sessions WHERE token_hash = ?').get(hash(value));
-      return session?.expires_at > Date.now() && session.user_sub === ownerSub ?
-        { sub: session.user_sub, csrf: session.csrf } : null;
+      const person = session && member(book, session.user_sub);
+      return session?.expires_at > Date.now() && person ?
+        { sub: session.user_sub, role: person.role, csrf: session.csrf } : null;
     },
     logout(req, res) {
       const value = cookieValue(req, 'bb_session');

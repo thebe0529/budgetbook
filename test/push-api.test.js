@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { Book } from '../src/book.js';
 import { createImportApi } from '../src/import-api.js';
 import { issueApiKey, issueAccountKey, saveParserRules, getParserRules } from '../src/push-credentials.js';
+import { ensureOwner, setMember, removeMember } from '../src/members.js';
+import { approveEvent, listReviewEvents } from '../src/review.js';
 
 const patterns = { amount: '금액\\s*([\\d,]+)', date: '(\\d{4}-\\d{2}-\\d{2})' };
 
@@ -10,6 +12,8 @@ test('API key identifies user, account key scopes account, configured regex pars
   const book = new Book();
   book.createAccount({ id: 'bank', name: '보통예금', type: 'asset' });
   book.createAccount({ id: 'other', name: '다른 계좌', type: 'asset' });
+  ensureOwner(book, 'pocket-id-user-1');
+  setMember(book, 'pocket-id-user-1', 'pocket-id-user-2', 'editor', ['other']);
   const userApi = issueApiKey(book, 'pocket-id-user-1');
   const userAccount = issueAccountKey(book, 'pocket-id-user-1', 'bank');
   const strangerAccount = issueAccountKey(book, 'pocket-id-user-2', 'other');
@@ -42,8 +46,10 @@ test('API key identifies user, account key scopes account, configured regex pars
 test('admin page requires authenticated session and CSRF token', async () => {
   const book = new Book();
   book.createAccount({ id: 'bank', name: '<생활비>', type: 'asset' });
+  ensureOwner(book, 'owner');
+  assert.throws(() => setMember(book, 'owner', 'owner', 'viewer', ['bank']), /Invalid member/);
   const auth = { session: req => req.headers.cookie === 'test=valid' ?
-    { sub: 'owner', csrf: 'csrf-value' } : null };
+    { sub: 'owner', role: 'owner', csrf: 'csrf-value' } : null };
   const server = createImportApi(book, { auth });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}/admin/regex`;
@@ -64,5 +70,59 @@ test('admin page requires authenticated session and CSRF token', async () => {
         action: 'save', ...patterns }) });
     assert.equal(saved.status, 200);
     assert.deepEqual(getParserRules(book, 'owner', 'bank'), { ...patterns, payee: '', memo: '' });
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('family editor can approve own account import once; removed member loses key access', async () => {
+  const book = new Book();
+  book.createAccount({ id: 'bank', name: '예금', type: 'asset', onBudget: true, cash: true });
+  book.createAccount({ id: 'other', name: '비공개', type: 'asset' });
+  book.createAccount({ id: 'food', name: '식비', type: 'expense' });
+  book.createAccount({ id: 'equity', name: '기초순자산', type: 'equity' });
+  book.createBudgetCategory({ id: 'food-budget', name: '식비' });
+  book.record({ id: 'opening', date: '2026-10-01', postings: [
+    { accountId: 'bank', side: 'debit', amount: 100_000 },
+    { accountId: 'equity', side: 'credit', amount: 100_000 },
+  ] });
+  ensureOwner(book, 'owner');
+  setMember(book, 'owner', 'family-editor', 'editor', ['bank']);
+  setMember(book, 'owner', 'family-reader', 'viewer', ['bank']);
+  assert.throws(() => issueAccountKey(book, 'family-editor', 'other'), /permission/);
+  assert.throws(() => issueApiKey(book, 'family-reader'), /Editor/);
+  const key = issueApiKey(book, 'family-editor');
+  const account = issueAccountKey(book, 'family-editor', 'bank');
+  saveParserRules(book, 'family-editor', 'bank', patterns);
+  const server = createImportApi(book);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const response = await fetch(`${base}/api/v1/push-events`, { method: 'POST', headers: {
+      Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json',
+      'Idempotency-Key': 'family-test-1' }, body: JSON.stringify({ accountKey: account.key,
+        rawText: '2026-10-10 금액 20,000' }) });
+    const { id } = await response.json();
+    assert.equal(listReviewEvents(book, 'family-reader').length, 1);
+    assert.equal(listReviewEvents(book, 'family-editor').length, 1);
+    assert.equal(book.reports('2026-10-01', '2026-10-31').balanceSheet.accounts.bank, 100_000);
+    assert.throws(() => approveEvent(book, 'family-reader', { eventId: id, kind: 'expense',
+      counterAccountId: 'food', amount: 20_000, date: '2026-10-10' }), /write access/);
+    assert.throws(() => approveEvent(book, 'family-editor', { eventId: id, kind: 'expense',
+      counterAccountId: 'food', categoryId: 'missing', amount: 20_000, date: '2026-10-10' }), /category/);
+    assert.equal(book.entries().length, 1);
+    assert.equal(listReviewEvents(book, 'family-editor')[0].status, 'parsed-pending-review');
+    const approved = approveEvent(book, 'family-editor', { eventId: id, kind: 'expense',
+      counterAccountId: 'food', categoryId: 'food-budget', amount: 20_000, date: '2026-10-10' });
+    assert.equal(approved.duplicate, false);
+    assert.equal(approveEvent(book, 'family-editor', { eventId: id }).duplicate, true);
+    assert.equal(book.entries().length, 2);
+    assert.equal(book.reports('2026-10-01', '2026-10-31').balanceSheet.accounts.bank, 80_000);
+    assert.equal(book.budget('2026-10').categories['food-budget'].spent, 20_000);
+    assert.ok(listReviewEvents(book, 'family-editor')[0].approvedBy === 'family-editor');
+    assert.equal(listReviewEvents(book, 'family-reader')[0].approvedEntryId, `import:${id}`);
+    removeMember(book, 'owner', 'family-editor');
+    assert.equal((await fetch(`${base}/api/v1/push-events`, { method: 'POST', headers: {
+      Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json',
+      'Idempotency-Key': 'family-test-2' }, body: JSON.stringify({ accountKey: account.key,
+        rawText: '2026-10-10 금액 100' }) })).status, 401);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });

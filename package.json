@@ -8,8 +8,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "import-api": "node bin/import-server.js",
-    "import-channel": "node bin/import-channel.js"
+    "import-api": "node bin/import-server.js"
   },
   "dependencies": {
     "openid-client": "^6.8.8"

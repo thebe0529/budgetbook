@@ -35,7 +35,12 @@ export class Book {
         nonce TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS user_sessions (
         token_hash TEXT PRIMARY KEY, user_sub TEXT NOT NULL, csrf TEXT NOT NULL,
-        expires_at INTEGER NOT NULL);`);
+        expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS family_members (
+        user_sub TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('owner','editor','viewer')));
+      CREATE TABLE IF NOT EXISTS member_accounts (
+        user_sub TEXT NOT NULL, account_id TEXT NOT NULL,
+        PRIMARY KEY(user_sub, account_id));`);
   }
 
   close() { this.db.close(); }

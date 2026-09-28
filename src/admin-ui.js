@@ -1,5 +1,7 @@
 import { getParserRules, issueAccountKey, issueApiKey, revokeKey, saveParserRules } from './push-credentials.js';
 import { parsePush } from './push-parser.js';
+import { canAccessAccount, member, removeMember, setMember, visibleAccounts } from './members.js';
+import { approveEvent, listReviewEvents } from './review.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -12,7 +14,8 @@ function page(title, content) {
     button{padding:.65rem 1rem;margin-top:1rem;background:#174a7e;color:white;border:0;border-radius:5px;cursor:pointer}
     pre{white-space:pre-wrap;background:#eef3f8;padding:1rem;border-radius:5px}nav{display:flex;gap:1rem}
     .notice{padding:1rem;background:#eaf5ed}.error{padding:1rem;background:#ffedeb}
-    </style></head><body><nav><a href="/admin/regex">정규식 설정</a><a href="/auth/logout">로그아웃</a></nav>
+    </style></head><body><nav><a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
+    <a href="/admin/family">가족 관리</a><a href="/auth/logout">로그아웃</a></nav>
     <h1>${escape(title)}</h1>${content}</body></html>`;
 }
 
@@ -43,7 +46,7 @@ function fields(form) {
 }
 
 function renderConfig(book, session, accountId, values, message = '') {
-  const accounts = [...book.accounts().values()].filter(a => ['asset', 'liability'].includes(a.type));
+  const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
   const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
   if (!selected) return page('정규식 설정', '<p>먼저 계좌를 등록하세요.</p>');
   const rules = values ?? getParserRules(book, session.sub, selected.id) ?? {};
@@ -77,6 +80,50 @@ function renderConfig(book, session, accountId, values, message = '') {
     <h3>현재 활성 키</h3><ul>${keyRows || '<li>없음</li>'}</ul>`);
 }
 
+function renderReview(book, session, message = '') {
+  const events = listReviewEvents(book, session.sub);
+  const counters = [...book.accounts().values()].filter(a => ['expense', 'income'].includes(a.type));
+  const categories = [...book.budgetCategories().values()];
+  const rows = events.map(event => {
+    const canEdit = canAccessAccount(book, session.sub, event.accountId, 'write');
+    const options = counters.map(a => `<option value="${escape(a.id)}">${escape(a.name)} (${a.type})</option>`).join('');
+    const categoryOptions = categories.map(c => `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
+    const form = event.status === 'approved' ? `<p>승인 분개: ${escape(event.approvedEntryId)}</p>` :
+      !canEdit ? '<p>읽기 권한만 있습니다.</p>' : `<form method="post" action="/admin/approve">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="eventId" value="${escape(event.id)}">
+      <label>유형</label><select name="kind"><option value="expense">지출</option><option value="income">수입</option></select>
+      <label>금액(원)</label><input name="amount" inputmode="numeric" value="${escape(Math.abs(event.parsed?.amount ?? 0) || '')}">
+      <label>일자</label><input name="date" value="${escape(event.parsed?.date ?? '')}">
+      <label>거래처·메모</label><input name="payee" value="${escape(event.parsed?.payee ?? '')}">
+      <label>상대 계정</label><select name="counterAccountId">${options}</select>
+      <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${categoryOptions}</select>
+      <button>원장에 승인</button></form>`;
+    return `<section><h2>${escape(book.accounts().get(event.accountId)?.name)} · ${escape(event.status)}</h2>
+      <p>수신 ID: ${escape(event.id)}</p><pre>${escape(event.rawText)}</pre>
+      ${event.parseError ? `<p class="error">파싱: ${escape(event.parseError)}</p>` : ''}
+      ${form}</section><hr>`;
+  }).join('');
+  return page('수신 거래 검토', `${message}${rows || '<p>수신 내역이 없습니다.</p>'}`);
+}
+
+function renderFamily(book, session, message = '') {
+  const members = book.db.prepare("SELECT user_sub, role FROM family_members WHERE role <> 'owner' ORDER BY user_sub").all();
+  const accounts = [...book.accounts().values()].filter(a => ['asset', 'liability'].includes(a.type));
+  const checkboxes = accounts.map(a => `<label><input type="checkbox" name="accountId" value="${escape(a.id)}"
+    style="width:auto"> ${escape(a.name)}</label>`).join('');
+  const rows = members.map(person => `<li>${escape(person.user_sub)} (${escape(person.role)})
+    <form method="post" action="/admin/family/remove"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="sub" value="${escape(person.user_sub)}"><button>구성원 제거</button></form></li>`).join('');
+  return page('가족 구성원 관리', `${message}<p>Pocket ID 사용자의 정확한 sub를 입력합니다.
+    읽기 권한은 수신 내역을 볼 수 있고, 편집 권한은 지정 계좌의 정규식·키·거래 승인을 관리할 수 있습니다.</p>
+    <form method="post" action="/admin/family"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <label>사용자 sub</label><input name="sub" required>
+      <label>역할</label><select name="role"><option value="viewer">읽기</option><option value="editor">편집</option></select>
+      <fieldset><legend>접근할 계좌</legend>${checkboxes}</fieldset><button>구성원 저장</button></form>
+    <h2>등록된 구성원</h2><ul>${rows || '<li>없음</li>'}</ul>`);
+}
+
 export async function handleAdmin(book, auth, req, res, pathname) {
   if (pathname === '/auth/login') { await auth.start(res); return true; }
   if (pathname === '/auth/callback') {
@@ -89,15 +136,43 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/review') {
+      sendHtml(res, 200, renderReview(book, session)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/family') {
+      if (session.role !== 'owner') throw new Error('Owner access required');
+      sendHtml(res, 200, renderFamily(book, session)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/approve', '/admin/family', '/admin/family/remove'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      if (pathname === '/admin/approve') {
+        const result = approveEvent(book, session.sub, {
+          eventId: form.get('eventId'), kind: form.get('kind'),
+          counterAccountId: form.get('counterAccountId'), categoryId: form.get('categoryId') || null,
+          amount: Number(form.get('amount')), date: form.get('date'), payee: form.get('payee'),
+        });
+        sendHtml(res, 200, renderReview(book, session,
+          `<p class="notice">${result.duplicate ? '이미 승인된' : '승인한'} 거래: ${escape(result.entryId)}</p>`));
+        return true;
+      }
+      if (session.role !== 'owner') throw new Error('Owner access required');
+      if (pathname.endsWith('/remove')) removeMember(book, session.sub, form.get('sub'));
+      else setMember(book, session.sub, form.get('sub'), form.get('role'), form.getAll('accountId'));
+      sendHtml(res, 200, renderFamily(book, session, '<p class="notice">구성원을 변경했습니다.</p>'));
+      return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/regex') {
+      if (session.role === 'viewer') throw new Error('Editor access required');
       const accountId = new URL(req.url, 'http://localhost').searchParams.get('accountId');
       sendHtml(res, 200, renderConfig(book, session, accountId)); return true;
     }
     if (req.method === 'POST' && ['/admin/regex', '/admin/keys', '/admin/revoke'].includes(pathname)) {
+      if (session.role === 'viewer') throw new Error('Editor access required');
       const form = await formBody(req);
       if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
       const accountId = form.get('accountId');
-      if (!book.accounts().has(accountId)) throw new Error('Unknown account');
+      if (!canAccessAccount(book, session.sub, accountId, 'write')) throw new Error('Account access denied');
       if (pathname === '/admin/revoke') {
         if (!revokeKey(book, form.get('type'), form.get('keyId'), session.sub)) {
           throw new Error('Key not found');
