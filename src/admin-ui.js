@@ -2,6 +2,11 @@ import { getParserRules, issueAccountKey, issueApiKey, revokeKey, saveParserRule
 import { parsePush } from './push-parser.js';
 import { canAccessAccount, member, removeMember, setMember, visibleAccounts } from './members.js';
 import { approveEvent, listReviewEvents } from './review.js';
+import { randomUUID } from 'node:crypto';
+import { accountOverview, accountRegister, createCategory, createGroup,
+  createLedgerAccount, recordManual } from './manual.js';
+import { calculateAmount } from './amount-expression.js';
+import { assertMonth } from './ledger.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -14,9 +19,110 @@ function page(title, content) {
     button{padding:.65rem 1rem;margin-top:1rem;background:#174a7e;color:white;border:0;border-radius:5px;cursor:pointer}
     pre{white-space:pre-wrap;background:#eef3f8;padding:1rem;border-radius:5px}nav{display:flex;gap:1rem}
     .notice{padding:1rem;background:#eaf5ed}.error{padding:1rem;background:#ffedeb}
-    </style></head><body><nav><a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
+    table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #d8e1eb;padding:.5rem;text-align:left}
+    </style></head><body><nav><a href="/admin/accounts">계좌</a><a href="/admin/budget">예산</a>
+    <a href="/admin/reports">보고서</a>
+    <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
     <a href="/admin/family">가족 관리</a><a href="/auth/logout">로그아웃</a></nav>
     <h1>${escape(title)}</h1>${content}</body></html>`;
+}
+
+function renderAccounts(book, session, message = '') {
+  const overview = accountOverview(book, session.sub, '9999-12-31');
+  const rows = overview.map(a => `<tr><td><a href="/admin/register?accountId=${encodeURIComponent(a.id)}">${escape(a.name)}</a></td>
+    <td>${escape(a.type)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}원</td></tr>`).join('');
+  const typeOptions = ['asset', 'liability', 'equity', 'income', 'expense']
+    .map(type => `<option value="${type}">${type}</option>`).join('');
+  const groups = book.accountGroups().map(g => `<option value="${escape(g.id)}">${escape(g.name)} (${g.type})</option>`).join('');
+  const controls = session.role !== 'owner' ? '' : `<h2>계좌 그룹 추가</h2>
+    <form method="post" action="/admin/groups"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <label>그룹 이름</label><input name="name" required><label>그룹 유형</label>
+      <select name="type"><option value="asset">자산</option><option value="liability">부채</option></select><button>그룹 생성</button></form>
+    <h2>계좌 추가</h2><form method="post" action="/admin/accounts">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <label>계좌명</label><input name="name" required><label>회계 유형</label><select name="type">${typeOptions}</select>
+      <label>계좌 그룹</label><select name="groupId"><option value="">없음</option>${groups}</select>
+      <label><input type="checkbox" name="onBudget" style="width:auto"> 온버짓</label>
+      <label><input type="checkbox" name="cash" style="width:auto"> 현금성 자산</label>
+      <label><input type="checkbox" name="card" style="width:auto"> 신용카드 부채</label>
+      <button>계좌 생성</button></form>
+    <h2>예산 카테고리 추가</h2><form method="post" action="/admin/categories">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <label>카테고리명</label><input name="name" required><button>카테고리 생성</button></form>`;
+  return page('계좌 관리', `${message}<table><thead><tr><th>계좌</th><th>유형</th><th>잔액</th></tr></thead>
+    <tbody>${rows}</tbody></table>${controls}`);
+}
+
+function renderRegister(book, session, accountId, message = '') {
+  const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
+  if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
+  const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
+  if (!selected) return page('거래 입력', '<p>볼 수 있는 계좌가 없습니다.</p>');
+  const register = accountRegister(book, session.sub, selected.id, '9999-12-31');
+  const options = accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('');
+  const counters = [...book.accounts().values()].filter(a => ['income', 'expense', 'equity'].includes(a.type) ||
+    (['asset', 'liability'].includes(a.type) && canAccessAccount(book, session.sub, a.id, 'write')))
+    .map(a => `<option value="${escape(a.id)}">${escape(a.name)} (${a.type})</option>`).join('');
+  const categories = [...book.budgetCategories().values()].map(c =>
+    `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
+  const input = !canAccessAccount(book, session.sub, selected.id, 'write') ?
+    '<p>읽기 권한만 있습니다.</p>' : `<h2>거래 추가</h2><form method="post" action="/admin/transactions">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="accountId" value="${escape(selected.id)}">
+      <input type="hidden" name="requestId" value="${randomUUID()}">
+      <label>일자</label><input type="date" name="date" required>
+      <label>유형</label><select name="kind"><option value="expense">지출</option><option value="income">수입</option>
+        <option value="transfer">이체·카드 결제</option>${session.role === 'owner' ? '<option value="opening">기초 잔액</option>' : ''}</select>
+      <label>상대 계정</label><select name="counterId">${counters}</select>
+      <label>금액 (사칙연산 가능)</label><input name="amountExpression" required placeholder="10000+2500*2">
+      <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${categories}</select>
+      <label>메모</label><input name="memo"><button>거래 저장</button></form>`;
+  const rows = register.rows.slice(0, 200).map(row => `<tr><td>${escape(row.date)}</td><td>${escape(row.memo)}</td>
+    <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td></tr>`).join('');
+  return page(`${selected.name} 거래`, `${message}<form method="get" action="/admin/register">
+    <label>계좌</label><select name="accountId">${options}</select><button>조회</button></form>
+    <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원</p>${input}
+    <h2>최근 거래</h2><table><tr><th>일자</th><th>메모</th><th>증감</th><th>잔액</th></tr>${rows}</table>`);
+}
+
+function renderReports(book, session, fromDate, throughDate, message = '') {
+  const overview = accountOverview(book, session.sub, throughDate);
+  const rows = overview.map(a => `<tr><td>${escape(a.name)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}</td></tr>`).join('');
+  let consolidated = '<p>가족 구성원에게는 허용된 계좌의 잔액만 표시합니다.</p>';
+  if (session.role === 'owner') {
+    const report = book.reports(fromDate, throughDate);
+    consolidated = `<h2>장부 전체</h2><p>자산 ${report.balanceSheet.assets.toLocaleString('ko-KR')}원 ·
+      부채 ${report.balanceSheet.liabilities.toLocaleString('ko-KR')}원 ·
+      순자산 ${report.balanceSheet.netWorth.toLocaleString('ko-KR')}원</p>
+      <p>기간 수입 ${report.incomeStatement.income.toLocaleString('ko-KR')}원 ·
+      비용 ${report.incomeStatement.expenses.toLocaleString('ko-KR')}원 ·
+      순손익 ${report.incomeStatement.result.toLocaleString('ko-KR')}원 ·
+      현금 증감 ${report.cashFlow.netChange.toLocaleString('ko-KR')}원</p>`;
+  }
+  return page('보고서', `${message}<form method="get" action="/admin/reports">
+    <label>시작일</label><input type="date" name="fromDate" value="${escape(fromDate)}">
+    <label>기준일</label><input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
+    <h2>접근 가능한 계좌 잔액</h2><table><tr><th>계좌</th><th>잔액</th></tr>${rows}</table>${consolidated}`);
+}
+
+function renderBudget(book, session, month, message = '') {
+  assertMonth(month);
+  if (session.role !== 'owner') throw new Error('Owner access required');
+  const budget = book.budget(month);
+  const rows = Object.values(budget.categories).map(category => `<tr><td>${escape(category.name)}</td>
+    <td>${category.budgeted.toLocaleString('ko-KR')}</td>
+    <td>${category.spent.toLocaleString('ko-KR')}</td>
+    <td>${category.balance.toLocaleString('ko-KR')}</td>
+    <td><form method="post" action="/admin/budget"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="month" value="${escape(month)}">
+      <input type="hidden" name="categoryId" value="${escape(category.categoryId)}">
+      <input name="amountExpression" aria-label="${escape(category.name)} 예산" placeholder="월 배정액" required>
+      <button>배정</button></form></td></tr>`).join('');
+  return page('월별 예산', `${message}<form method="get" action="/admin/budget">
+    <label>월</label><input type="month" name="month" value="${escape(month)}"><button>조회</button></form>
+    <p>온버짓 가용 자금: ${budget.availableFunds.toLocaleString('ko-KR')}원 ·
+      미배정 자금: ${budget.readyToAssign.toLocaleString('ko-KR')}원</p>
+    <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th></tr>${rows}</table>`);
 }
 
 function sendHtml(res, status, html) {
@@ -47,6 +153,7 @@ function fields(form) {
 
 function renderConfig(book, session, accountId, values, message = '') {
   const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
+  if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
   const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
   if (!selected) return page('정규식 설정', '<p>먼저 계좌를 등록하세요.</p>');
   const rules = values ?? getParserRules(book, session.sub, selected.id) ?? {};
@@ -136,6 +243,61 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/accounts') {
+      sendHtml(res, 200, renderAccounts(book, session)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/register') {
+      const accountId = new URL(req.url, 'http://localhost').searchParams.get('accountId');
+      sendHtml(res, 200, renderRegister(book, session, accountId)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/reports') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+      const fromDate = query.get('fromDate') || `${today.slice(0, 7)}-01`;
+      const throughDate = query.get('throughDate') || today;
+      sendHtml(res, 200, renderReports(book, session, fromDate, throughDate)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/budget') {
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+      const month = new URL(req.url, 'http://localhost').searchParams.get('month') || today.slice(0, 7);
+      sendHtml(res, 200, renderBudget(book, session, month)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/budget') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      if (session.role !== 'owner') throw new Error('Owner access required');
+      const month = form.get('month');
+      const amount = calculateAmount(form.get('amountExpression'));
+      book.assignBudget(month, form.get('categoryId'), amount);
+      sendHtml(res, 200, renderBudget(book, session, month,
+        '<p class="notice">월별 예산을 저장했습니다.</p>'));
+      return true;
+    }
+    if (req.method === 'POST' && ['/admin/groups', '/admin/accounts', '/admin/categories',
+      '/admin/transactions'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      if (pathname === '/admin/transactions') {
+        const result = recordManual(book, session.sub, {
+          date: form.get('date'), kind: form.get('kind'), accountId: form.get('accountId'),
+          counterId: form.get('counterId'), categoryId: form.get('categoryId') || null,
+          amountExpression: form.get('amountExpression'), memo: form.get('memo') || '',
+          requestId: form.get('requestId'),
+        });
+        sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
+          `<p class="notice">${result.duplicate ? '이미 저장된' : '저장한'} 거래: ${escape(result.entry.id)}</p>`));
+        return true;
+      }
+      if (session.role !== 'owner') throw new Error('Owner access required');
+      if (pathname === '/admin/groups') createGroup(book, session.sub, form.get('name'), form.get('type'));
+      if (pathname === '/admin/accounts') createLedgerAccount(book, session.sub, {
+        name: form.get('name'), type: form.get('type'), groupId: form.get('groupId') || null,
+        onBudget: form.has('onBudget'), cash: form.has('cash'), card: form.has('card'),
+      });
+      if (pathname === '/admin/categories') createCategory(book, session.sub, form.get('name'));
+      sendHtml(res, 200, renderAccounts(book, session, '<p class="notice">항목을 생성했습니다.</p>'));
+      return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/review') {
       sendHtml(res, 200, renderReview(book, session)); return true;
     }
