@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import { getImportEvent } from './imports.js';
 import { identifyPushOwner, receivePush } from './push-credentials.js';
 import { handleAdmin } from './admin-ui.js';
+import { localSnapshot, acceptLocalTransaction } from './local-sync.js';
+import { readFileSync } from 'node:fs';
 
 function json(res, status, body, headers = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -24,6 +26,23 @@ async function readBody(req) {
 export function createImportApi(book, { auth } = {}) {
   return createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    const assets = new Map([
+      ['/app', ['../public/index.html', 'text/html; charset=utf-8']],
+      ['/app/', ['../public/index.html', 'text/html; charset=utf-8']],
+      ['/app/app.js', ['../public/app.js', 'text/javascript; charset=utf-8']],
+      ['/app/sw.js', ['../public/sw.js', 'text/javascript; charset=utf-8']],
+      ['/app/manifest.json', ['../public/manifest.json', 'application/manifest+json']],
+      ['/app/icon.svg', ['../public/icon.svg', 'image/svg+xml']],
+      ['/app/icon-192.png', ['../public/icon-192.png', 'image/png']],
+      ['/app/icon-512.png', ['../public/icon-512.png', 'image/png']],
+    ]);
+    if (req.method === 'GET' && assets.has(pathname)) {
+      const [path, contentType] = assets.get(pathname);
+      res.writeHead(200, { 'Content-Type': contentType, 'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'no-cache',
+        'Content-Security-Policy': "default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'" });
+      res.end(readFileSync(new URL(path, import.meta.url))); return;
+    }
     if (pathname === '/healthz' && req.method === 'GET') {
       try {
         book.db.prepare('SELECT 1').get();
@@ -34,6 +53,25 @@ export function createImportApi(book, { auth } = {}) {
     if (auth) {
       try { if (await handleAdmin(book, auth, req, res, pathname)) return; }
       catch { return json(res, 503, { error: 'Login temporarily unavailable' }); }
+    }
+    if (pathname === '/api/v1/local/state' && req.method === 'GET') {
+      const session = auth?.session(req);
+      if (!session) return json(res, 401, { error: 'Login required' });
+      return json(res, 200, { ...localSnapshot(book, session.sub), csrf: session.csrf });
+    }
+    if (pathname === '/api/v1/local/transactions' && req.method === 'POST') {
+      const session = auth?.session(req);
+      if (!session) return json(res, 401, { error: 'Login required' });
+      if (!req.headers['content-type']?.startsWith('application/json')) {
+        return json(res, 415, { error: 'JSON required' });
+      }
+      if (req.headers['x-csrf-token'] !== session.csrf) return json(res, 403, { error: 'CSRF failed' });
+      try {
+        const { entry, duplicate } = acceptLocalTransaction(book, session.sub, await readBody(req));
+        return json(res, duplicate ? 200 : 201, { id: entry.id, duplicate });
+      } catch (error) {
+        return json(res, 400, { error: error.message });
+      }
     }
     if (pathname.startsWith('/admin/') || pathname.startsWith('/auth/')) {
       return json(res, 503, { error: 'Pocket ID login is not configured' });

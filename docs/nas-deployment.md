@@ -15,4 +15,4 @@
 - `./backups`에 기본 1일 주기로 백업을 보관합니다. 소유자는 `/admin/backups`에서 주기와 보관 수를 변경할 수 있습니다. NAS 스냅샷이나 별도 저장소로 `backups` 폴더도 보호하세요.
 - 복구할 때는 `docker compose stop budgetbook`으로 서버를 중지하고 원본 DB 파일을 별도로 보관한 뒤 원하는 백업 파일을 `./data/budget.sqlite`로 복사합니다. 파일의 UID/GID가 컨테이너 사용자와 맞는지 확인한 뒤 `docker compose up -d`로 시작합니다. 사용자가 로그아웃되거나 백업 시점 이후 거래가 사라질 수 있으므로 복구는 별도 사본에서 먼저 확인하세요.
 
-Google Drive 자동 저장과 실제 Pocket ID 서버 연동 검증은 아직 이 배포 구성에 포함하지 않았습니다. PWA와 로컬 동기화도 아직 구현되지 않았습니다.
+Google Drive 자동 저장과 실제 Pocket ID 서버 연동 검증은 아직 이 배포 구성에 포함하지 않았습니다. PWA의 단순 거래 오프라인 입력은 [로컬 동기화 안내](local-sync.md)를 참고하세요. 전체 장부 양방향 동기화는 아직 구현되지 않았습니다.

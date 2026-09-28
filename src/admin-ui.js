@@ -34,6 +34,7 @@ function page(title, content) {
     <a href="/admin/forecast">현금흐름 예상</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
     <a href="/admin/family">가족 관리</a><a href="/admin/backups">백업</a>
+    <a href="/app/">로컬 입력</a>
     <a href="/auth/logout">로그아웃</a></nav>
     <h1>${escape(title)}</h1>${content}</body></html>`;
 }

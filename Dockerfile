@@ -8,6 +8,7 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY src ./src
 COPY bin ./bin
+COPY public ./public
 
 USER node
 EXPOSE 38181
