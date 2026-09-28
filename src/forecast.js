@@ -87,6 +87,32 @@ export function matchingEntries(book, sub, scheduleId, date) {
   return book.entries().filter(entry => !used.has(entry.id) && matches(schedule, date, entry));
 }
 
+// Link only unambiguous matches; ambiguous or absent candidates remain for review.
+export function autoLinkMatches(book, sub, { scheduleId, dates }) {
+  owner(book, sub);
+  if (!listSchedules(book, sub).some(s => s.id === scheduleId)) throw new Error('Unknown cash schedule');
+  if (!Array.isArray(dates) || dates.length > 123 || new Set(dates).size !== dates.length) {
+    throw new Error('Invalid matching dates');
+  }
+  return book.atomic(() => {
+    const alreadyLinked = new Set(linkedOccurrences(book, sub)
+      .filter(link => link.schedule_id === scheduleId).map(link => link.occurrence_date));
+    const choices = dates.filter(date => !alreadyLinked.has(date))
+      .map(date => ({ date, candidates: matchingEntries(book, sub, scheduleId, date) }));
+    const candidateCounts = new Map();
+    for (const { candidates } of choices) for (const entry of candidates) {
+      candidateCounts.set(entry.id, (candidateCounts.get(entry.id) ?? 0) + 1);
+    }
+    const linked = [];
+    for (const { date, candidates } of choices) {
+      if (candidates.length !== 1 || candidateCounts.get(candidates[0].id) !== 1) continue;
+      linkOccurrence(book, sub, { scheduleId, date, entryId: candidates[0].id });
+      linked.push({ date, entryId: candidates[0].id });
+    }
+    return linked;
+  });
+}
+
 export function disableSchedule(book, sub, id) {
   owner(book, sub);
   const row = book.db.prepare('SELECT data FROM cash_schedules WHERE id = ?').get(id);

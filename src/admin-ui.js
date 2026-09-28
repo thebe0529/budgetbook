@@ -10,9 +10,10 @@ import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
 import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
-import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
+import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
+import { cashMovementsCsv } from './report-export.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
@@ -167,7 +168,10 @@ function renderReports(book, session, fromDate, throughDate, message = '') {
       <td>${money(a.closing)}</td></tr>`).join('');
     const movements = detail.cashMovements.map(m => `<tr><td>${escape(m.date)}</td>
       <td><a href="${link(m.accountId)}">${escape(book.accounts().get(m.accountId)?.name ?? '')}</a></td>
-      <td>${escape(m.memo)}</td><td>${money(m.amount)}</td></tr>`).join('');
+      <td>${escape(m.activity)}</td><td>${escape(m.memo)}</td><td>${money(m.amount)}</td></tr>`).join('');
+    const activityLabels = { operating: '영업활동', investing: '투자활동', financing: '재무활동' };
+    const activityRows = Object.entries(detail.cashFlowActivities.totals).map(([key, value]) =>
+      `<tr><td>${activityLabels[key]}</td><td>${money(value)}</td></tr>`).join('');
     consolidated = `<h2>재무상태표 · ${escape(throughDate)}</h2>
       <table><tr><th>유형</th><th>계좌 그룹</th><th>계정</th><th>잔액</th></tr>${positionRows}</table>
       <p>자산 ${money(bs.assets)}원 · 부채 ${money(bs.liabilities)}원 · 순자산 ${money(bs.netWorth)}원<br>
@@ -181,8 +185,11 @@ function renderReports(book, session, fromDate, throughDate, message = '') {
       <tr><th>합계</th><th>${money(detail.cashTotals.opening)}</th><th>${money(detail.cashTotals.receipts)}</th>
       <th>${money(detail.cashTotals.payments)}</th><th>${money(detail.cashTotals.closing)}</th></tr></table>
       <p>현금 순증감 ${money(detail.summary.cashFlow.netChange)}원</p>
+      <p><a href="/admin/reports/cash.csv?fromDate=${encodeURIComponent(fromDate)}&throughDate=${encodeURIComponent(throughDate)}">현금 입출금 CSV 다운로드</a></p>
+      <h3>활동별 현금흐름</h3>
+      <table><tr><th>활동</th><th>순증감</th></tr>${activityRows}</table>
       <details><summary>현금 입출금 원거래 전체 보기</summary>
-      <table><tr><th>일자</th><th>계좌</th><th>메모</th><th>증감</th></tr>${movements}</table></details>`;
+      <table><tr><th>일자</th><th>계좌</th><th>활동</th><th>메모</th><th>증감</th></tr>${movements}</table></details>`;
   }
   return page('보고서', `${message}<form method="get" action="/admin/reports">
     <label>시작일</label><input type="date" name="fromDate" value="${escape(fromDate)}">
@@ -407,6 +414,15 @@ function renderForecast(book, session, query, message = '') {
       <input type="hidden" name="scheduleId" value="${escape(row.schedule_id)}">
       <input type="hidden" name="date" value="${escape(row.occurrence_date)}"><button>연결 해제</button>
     </form></td></tr>`).join('');
+  const autoForms = schedules.filter(s => s.active).map(s => {
+    const dates = result.events.filter(e => e.scheduleId === s.id).map(e => e.date);
+    if (!dates.length) return '';
+    return `<form method="post" action="/admin/forecast/auto-link" style="display:inline">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="scheduleId" value="${escape(s.id)}">
+      ${dates.map(date => `<input type="hidden" name="date" value="${escape(date)}">`).join('')}
+      <input type="hidden" name="asOf" value="${escape(asOf)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
+      <button>자동 매칭: ${escape(s.name)}</button></form>`;
+  }).join('');
   return page('현금흐름 예상', `${message}<p>현금성 계좌 합계: 시작 ${result.openingTotal.toLocaleString('ko-KR')}원 →
     종료 예상 ${result.projectedTotal.toLocaleString('ko-KR')}원</p>
     <p>예정 거래는 실제 원장에 기록되지 않습니다. 이미 입력한 미래 일자 거래는 별도 확정 거래로 표시됩니다.</p>
@@ -426,7 +442,7 @@ function renderForecast(book, session, query, message = '') {
       <option value="once">한 번</option></select><button>예정 거래 저장</button></form>
     <h2>등록된 예정 거래</h2><table><tr><th>이름</th><th>계좌</th><th>시작·반복</th><th>금액</th><th>상태</th></tr>${scheduleRows}</table>
     <h2>예상 상세</h2><table><tr><th>날짜</th><th>구분</th><th>내역</th><th>계좌</th>
-    <th>변동</th><th>예상 잔액·연결</th></tr>${eventRows}</table>
+    <th>변동</th><th>예상 잔액·연결</th></tr>${eventRows}</table><p>${autoForms}</p>
     <h2>실제 거래 연결 내역</h2><table><tr><th>예정 거래</th><th>회차 예정일</th>
     <th>원장 거래 ID</th><th>관리</th></tr>${linkedRows}</table>`);
 }
@@ -611,7 +627,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       sendHtml(res, 200, renderForecast(book, session, query)); return true;
     }
     if (req.method === 'POST' && ['/admin/forecast/schedules', '/admin/forecast/disable',
-      '/admin/forecast/link', '/admin/forecast/unlink'].includes(pathname)) {
+      '/admin/forecast/link', '/admin/forecast/unlink', '/admin/forecast/auto-link'].includes(pathname)) {
       const form = await formBody(req);
       if (form.get('csrf') !== session.csrf) {
         sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
@@ -619,6 +635,9 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       if (pathname.endsWith('disable')) disableSchedule(book, session.sub, form.get('id'));
       else if (pathname.endsWith('unlink')) unlinkOccurrence(book, session.sub, {
         scheduleId: form.get('scheduleId'), date: form.get('date'),
+      });
+      else if (pathname.endsWith('auto-link')) autoLinkMatches(book, session.sub, {
+        scheduleId: form.get('scheduleId'), dates: form.getAll('date'),
       });
       else if (pathname.endsWith('link')) linkOccurrence(book, session.sub, {
         scheduleId: form.get('scheduleId'), date: form.get('date'), entryId: form.get('entryId'),
@@ -710,6 +729,16 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const fromDate = query.get('fromDate') || `${today.slice(0, 7)}-01`;
       const throughDate = query.get('throughDate') || today;
       sendHtml(res, 200, renderReports(book, session, fromDate, throughDate)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/reports/cash.csv') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const fromDate = query.get('fromDate');
+      const throughDate = query.get('throughDate');
+      const csv = cashMovementsCsv(book, session.sub, fromDate, throughDate);
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="budgetbook-cash-${fromDate}-${throughDate}.csv"`,
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(csv); return true;
     }
     if (req.method === 'GET' && pathname === '/admin/reports/account') {
       const query = new URL(req.url, 'http://localhost').searchParams;

@@ -28,6 +28,15 @@ export function detailedReports(book, sub, fromDate, throughDate) {
   const cashRows = cash.map(a => ({ id: a.id, name: a.name, opening: opening[a.id],
     receipts: 0, payments: 0, closing: summary.balanceSheet.accounts[a.id] }));
   const cashMovements = [];
+  const activityTotals = { operating: 0, investing: 0, financing: 0 };
+  const activityRows = { operating: [], investing: [], financing: [] };
+  function activityFor(entry, cashId) {
+    const counterpartTypes = entry.postings.filter(p => p.accountId !== cashId)
+      .map(p => accounts.get(p.accountId)?.type).filter(Boolean);
+    if (counterpartTypes.some(type => ['income', 'expense'].includes(type))) return 'operating';
+    if (counterpartTypes.some(type => ['liability', 'equity'].includes(type))) return 'financing';
+    return 'investing';
+  }
   for (const entry of entries) {
     if (entry.date < fromDate || entry.date > throughDate) continue;
     for (const row of cashRows) {
@@ -36,8 +45,12 @@ export function detailedReports(book, sub, fromDate, throughDate) {
       if (!amount) continue;
       if (amount > 0) row.receipts += amount;
       else row.payments += -amount;
-      cashMovements.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '',
-        accountId: row.id, amount });
+      const activity = activityFor(entry, row.id);
+      const movement = { id: entry.id, date: entry.date, memo: entry.memo ?? '',
+        accountId: row.id, amount, activity };
+      cashMovements.push(movement);
+      activityTotals[activity] += amount;
+      activityRows[activity].push(movement);
     }
   }
   for (const row of cashRows) {
@@ -51,7 +64,10 @@ export function detailedReports(book, sub, fromDate, throughDate) {
   if (cashTotals.closing - cashTotals.opening !== summary.cashFlow.netChange) {
     throw new Error('Cash flow reconciliation failed');
   }
-  return { summary, positions, performance, cashRows, cashTotals, cashMovements };
+  if (Object.values(activityTotals).reduce((sum, value) => sum + value, 0) !==
+      summary.cashFlow.netChange) throw new Error('Cash flow activity reconciliation failed');
+  return { summary, positions, performance, cashRows, cashTotals, cashMovements,
+    cashFlowActivities: { rows: activityRows, totals: activityTotals } };
 }
 
 export function accountActivity(book, sub, accountId, fromDate, throughDate) {

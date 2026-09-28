@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { createLedgerAccount, recordManual } from '../src/manual.js';
-import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, matchingEntries,
+import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, matchingEntries,
   saveSchedule, unlinkOccurrence } from '../src/forecast.js';
 import { recordCardPurchase } from '../src/card-manual.js';
 import { createImportApi } from '../src/import-api.js';
@@ -100,7 +100,9 @@ test('forecast page respects owner role and CSRF', async () => {
   try {
     const page = await fetch(`${url}/admin/forecast?asOf=2026-10-01&throughDate=2026-12-31`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /예상 상세/);
+    const pageText = await page.text();
+    assert.match(pageText, /예상 상세/);
+    assert.match(pageText, /자동 매칭/);
     const denied = await fetch(`${url}/admin/forecast?asOf=2026-10-01&throughDate=2026-12-31`,
       { headers: { Cookie: 'viewer=1' } });
     assert.equal(denied.status, 400);
@@ -118,5 +120,41 @@ test('forecast page respects owner role and CSRF', async () => {
       body: new URLSearchParams({ csrf: 'token', scheduleId: schedule.id, date: '2026-11-25' }) });
     assert.equal(unlinked.status, 200);
     assert.equal(linkedOccurrences(book, 'owner').length, 0);
-  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+} finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('automatic matching links only an unambiguous candidate', () => {
+  const book = new Book();
+  try {
+    ensureOwner(book, 'owner');
+    const bank = createLedgerAccount(book, 'owner', { name: '은행', type: 'asset', cash: true });
+    const expense = createLedgerAccount(book, 'owner', { name: '비용', type: 'expense' });
+    const schedule = saveSchedule(book, 'owner', { accountId: bank.id, name: '월세',
+      startDate: '2026-10-25', frequency: 'once', amountExpression: '-50000' });
+    recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-10-25', kind: 'expense',
+      accountId: bank.id, counterId: expense.id, amountExpression: '50000' });
+    assert.equal(autoLinkMatches(book, 'owner', { scheduleId: schedule.id, dates: ['2026-10-25'] }).length, 1);
+  } finally { book.close(); }
+});
+
+test('automatic matching leaves overlapping monthly candidates for manual review', () => {
+  const book = new Book();
+  try {
+    ensureOwner(book, 'owner');
+    const bank = createLedgerAccount(book, 'owner', { name: '은행', type: 'asset', cash: true });
+    const expense = createLedgerAccount(book, 'owner', { name: '비용', type: 'expense' });
+    const schedule = saveSchedule(book, 'owner', { accountId: bank.id, name: '월 지출',
+      startDate: '2026-10-25', frequency: 'monthly', amountExpression: '-50000' });
+    const actual = recordManual(book, 'owner', { requestId: randomUUID(), date: '2026-11-10',
+      kind: 'expense', accountId: bank.id, counterId: expense.id, amountExpression: '50000' }).entry;
+    const dates = ['2026-10-25', '2026-11-25'];
+    assert.deepEqual(autoLinkMatches(book, 'owner', { scheduleId: schedule.id, dates }), []);
+    assert.equal(linkedOccurrences(book, 'owner').length, 0);
+    assert.throws(() => autoLinkMatches(book, 'owner', { scheduleId: schedule.id,
+      dates: [...dates, dates[0]] }), /Invalid matching dates/);
+    assert.deepEqual(autoLinkMatches(book, 'owner', { scheduleId: schedule.id,
+      dates: ['2026-11-25'] }), [{ date: '2026-11-25', entryId: actual.id }]);
+    assert.deepEqual(autoLinkMatches(book, 'owner', { scheduleId: schedule.id,
+      dates: ['2026-11-25'] }), []);
+  } finally { book.close(); }
 });
