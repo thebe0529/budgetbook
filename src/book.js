@@ -22,6 +22,20 @@ export class Book {
         id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
         external_id TEXT, payload_hash TEXT NOT NULL, data TEXT NOT NULL,
         UNIQUE(channel_id, idempotency_key), UNIQUE(channel_id, external_id));`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS user_api_keys (
+        id TEXT PRIMARY KEY, user_sub TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, revoked INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS account_keys (
+        id TEXT PRIMARY KEY, user_sub TEXT NOT NULL, account_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE, revoked INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS parser_rules (
+        user_sub TEXT NOT NULL, account_id TEXT NOT NULL, patterns TEXT NOT NULL,
+        PRIMARY KEY(user_sub, account_id));
+      CREATE TABLE IF NOT EXISTS oidc_pending (
+        state TEXT PRIMARY KEY, binding_hash TEXT NOT NULL, verifier TEXT NOT NULL,
+        nonce TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        token_hash TEXT PRIMARY KEY, user_sub TEXT NOT NULL, csrf TEXT NOT NULL,
+        expires_at INTEGER NOT NULL);`);
   }
 
   close() { this.db.close(); }
