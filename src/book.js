@@ -24,6 +24,8 @@ export class Book {
       CREATE TABLE IF NOT EXISTS backup_runs (
         id TEXT PRIMARY KEY, created_at TEXT NOT NULL, filename TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS adjustment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS adjustment_reversals (
+      original_id TEXT PRIMARY KEY, reversal_id TEXT NOT NULL UNIQUE);`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS import_channels (
         id TEXT PRIMARY KEY, account_id TEXT NOT NULL, token_hash TEXT NOT NULL,
         name TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
@@ -225,12 +227,13 @@ export class Book {
     }).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   }
 
-  adjustBatch({ id = randomUUID(), date, reason, entries }) {
+  adjustBatch({ id = randomUUID(), date, reason, entries, createdBy, payloadHash }) {
     assertDate(date);
     if (!reason?.trim() || !Array.isArray(entries) || entries.length === 0) {
       throw new Error('Adjustment needs a reason and at least one entry');
     }
-    const batch = { id, date, reason, entryIds: entries.map((_, i) => `adjust:${id}:${i + 1}`) };
+    const batch = { id, date, reason, entryIds: entries.map((_, i) => `adjust:${id}:${i + 1}`),
+      ...(createdBy ? { createdBy } : {}), ...(payloadHash ? { payloadHash } : {}) };
     const accounts = this.accounts();
     const journal = entries.map((entry, i) => ({ ...entry, id: batch.entryIds[i], date,
       kind: 'adjustment', memo: `${reason}${entry.memo ? `: ${entry.memo}` : ''}` }));

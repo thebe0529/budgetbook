@@ -14,6 +14,7 @@ import { disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSched
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
+import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -28,7 +29,8 @@ function page(title, content) {
     .notice{padding:1rem;background:#eaf5ed}.error{padding:1rem;background:#ffedeb}
     table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #d8e1eb;padding:.5rem;text-align:left}
     </style></head><body><nav><a href="/admin/accounts">계좌</a><a href="/admin/budget">예산</a>
-    <a href="/admin/reports">보고서</a><a href="/admin/cards">카드 예정액</a>
+    <a href="/admin/reports">보고서</a><a href="/admin/adjustments">일괄 조정</a>
+    <a href="/admin/cards">카드 예정액</a>
     <a href="/admin/forecast">현금흐름 예상</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
     <a href="/admin/family">가족 관리</a><a href="/admin/backups">백업</a>
@@ -217,6 +219,66 @@ function renderBackups(book, session, message = '') {
     ${book.backupManager ? `<form method="post" action="/admin/backups/run">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><button>지금 백업</button></form>` : ''}
     <h2>최근 백업</h2><table><tr><th>생성 시각 (UTC)</th><th>파일</th></tr>${rows}</table>`);
+}
+
+function renderAdjustments(book, session, message = '') {
+  if (session.role !== 'owner') throw new Error('Owner access required');
+  const accounts = [...book.accounts().values()];
+  const options = accounts.map(a => `<option value="${escape(a.id)}">${escape(a.name)} (${a.type})</option>`).join('');
+  const creditOptions = accounts.map((a, index) => `<option value="${escape(a.id)}" ${index === 1 ? 'selected' : ''}>
+    ${escape(a.name)} (${a.type})</option>`).join('');
+  const categories = [...book.budgetCategories().values()].map(c =>
+    `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
+  const row = `<tr><td><select name="debitId">${options}</select></td>
+    <td><select name="creditId">${creditOptions}</select></td>
+    <td><input name="amountExpression" placeholder="10000+2500" required></td>
+    <td><select name="categoryId"><option value="">없음</option>${categories}</select></td>
+    <td><input name="lineMemo" maxlength="200"></td>
+    <td><button type="button" data-remove-adjustment>삭제</button></td></tr>`;
+  const batches = listAdjustments(book, session.sub).slice(0, 50).map(batch => `<tr>
+    <td>${escape(batch.date)}</td><td>${escape(batch.reason)}</td><td>${batch.entryIds.length}</td>
+    <td><a href="/admin/adjustments/detail?id=${encodeURIComponent(batch.id)}">분개 조회</a></td>
+    <td>${batch.reversesBatchId ? '역분개 배치' : batch.reversalId ? '취소됨' :
+      `<form method="post" action="/admin/adjustments/reverse">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="batchId" value="${escape(batch.id)}">
+      <label>취소일</label><input type="date" name="date" required>
+      <label>사유</label><input name="reason" maxlength="200" required>
+      <button>역분개 기록</button></form>`}</td></tr>`).join('');
+  return page('누락 거래 일괄 조정', `${message}
+    <p>각 행은 차변과 대변이 같은 금액인 독립 분개입니다. 모든 행을 검증한 후 한꺼번에 기록합니다.
+    잘못 저장했다면 원래 분개를 삭제하지 않고 역분개 배치를 기록합니다.</p>
+    <form method="post" action="/admin/adjustments">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    <input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>조정일</label><input type="date" name="date" required>
+    <label>일괄 조정 사유</label><input name="reason" maxlength="200" required>
+    <table><tr><th>차변 계정</th><th>대변 계정</th><th>금액</th><th>예산</th><th>메모</th><th></th></tr>
+    <tbody id="adjustment-rows">${row}</tbody></table>
+    <button type="button" id="add-adjustment-row">행 추가</button><button>모든 조정 저장</button></form>
+    <template id="adjustment-row-template">${row}</template>
+    <script defer src="/admin/assets/adjustment.js"></script>
+    <h2>최근 조정 배치</h2><table><tr><th>일자</th><th>사유</th><th>분개</th><th>내역</th><th>취소</th></tr>
+    ${batches}</table>`);
+}
+
+function renderAdjustmentDetail(book, session, id) {
+  if (session.role !== 'owner') throw new Error('Owner access required');
+  const batch = listAdjustments(book, session.sub).find(b => b.id === id);
+  if (!batch) throw new Error('Adjustment batch not found');
+  const accounts = book.accounts();
+  const rows = batch.entryIds.flatMap(entryId => {
+    const row = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entryId);
+    if (!row) throw new Error('Adjustment entry missing');
+    const entry = JSON.parse(row.data);
+    return entry.postings.map(p => `<tr><td>${escape(entry.date)}</td><td>${escape(entry.id)}</td>
+      <td>${escape(entry.memo)}</td><td>${escape(accounts.get(p.accountId)?.name ?? '')}</td>
+      <td>${p.side === 'debit' ? escape(p.amount.toLocaleString('ko-KR')) : ''}</td>
+      <td>${p.side === 'credit' ? escape(p.amount.toLocaleString('ko-KR')) : ''}</td></tr>`);
+  }).join('');
+  return page('조정 분개 내역', `<p>${escape(batch.date)} · ${escape(batch.reason)}</p>
+    <table><tr><th>일자</th><th>분개 ID</th><th>메모</th><th>계정</th><th>차변</th><th>대변</th></tr>${rows}</table>
+    <p><a href="/admin/adjustments">일괄 조정으로 돌아가기</a></p>`);
 }
 
 function renderBudget(book, session, month, message = '') {
@@ -486,6 +548,44 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/assets/adjustment.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
+      res.end(readFileSync(new URL('./adjustment-ui.js', import.meta.url))); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/adjustments') {
+      sendHtml(res, 200, renderAdjustments(book, session)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/adjustments/detail') {
+      const id = new URL(req.url, 'http://localhost').searchParams.get('id');
+      sendHtml(res, 200, renderAdjustmentDetail(book, session, id)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/adjustments', '/admin/adjustments/reverse'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) {
+        sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
+      }
+      if (session.role !== 'owner') throw new Error('Owner access required');
+      if (pathname.endsWith('/reverse')) reverseAdjustment(book, session.sub, {
+        batchId: form.get('batchId'), date: form.get('date'), reason: form.get('reason'),
+      });
+      else {
+        const debit = form.getAll('debitId');
+        const credit = form.getAll('creditId');
+        const amount = form.getAll('amountExpression');
+        const category = form.getAll('categoryId');
+        const memo = form.getAll('lineMemo');
+        if (![credit, amount, category, memo].every(values => values.length === debit.length)) {
+          throw new Error('Incomplete adjustment row');
+        }
+        recordAdjustment(book, session.sub, { requestId: form.get('requestId'),
+          date: form.get('date'), reason: form.get('reason'),
+          rows: debit.map((debitId, i) => ({ debitId, creditId: credit[i],
+            amountExpression: amount[i], categoryId: category[i] || null, memo: memo[i] })) });
+      }
+      sendHtml(res, 200, renderAdjustments(book, session,
+        '<p class="notice">조정 배치를 기록했습니다.</p>')); return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/backups') {
       sendHtml(res, 200, renderBackups(book, session)); return true;
     }
