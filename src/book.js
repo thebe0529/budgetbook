@@ -164,7 +164,7 @@ export class Book {
   }
 
   cardPurchase({ id = randomUUID(), date, cardId, expenseId, amount, count, firstDueDate,
-    categoryId, memo = '' }) {
+    categoryId, memo = '', createdBy, payloadHash }) {
     assertDate(date);
     const accounts = this.accounts();
     if (!accounts.get(cardId)?.card || accounts.get(expenseId)?.type !== 'expense') {
@@ -175,7 +175,8 @@ export class Book {
       postings: [{ accountId: expenseId, side: 'debit', amount },
         { accountId: cardId, side: 'credit', amount }],
       ...(categoryId ? { budgetAllocations: [{ categoryId, amount }] } : {}) };
-    const plan = { id, purchaseEntryId: entry.id, cardId, installments };
+    const plan = { id, purchaseEntryId: entry.id, cardId, installments,
+      ...(createdBy ? { createdBy } : {}), ...(payloadHash ? { payloadHash } : {}) };
     return this.atomic(() => {
       this.record(entry);
       this.db.prepare('INSERT INTO card_plans (id, data) VALUES (?, ?)').run(id, JSON.stringify(plan));

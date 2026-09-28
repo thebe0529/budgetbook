@@ -6,9 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { accountOverview, accountRegister, createCategory, createGroup,
   createLedgerAccount, recordManual } from './manual.js';
 import { calculateAmount } from './amount-expression.js';
-import { assertMonth } from './ledger.js';
+import { assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
+import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -23,7 +24,7 @@ function page(title, content) {
     .notice{padding:1rem;background:#eaf5ed}.error{padding:1rem;background:#ffedeb}
     table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #d8e1eb;padding:.5rem;text-align:left}
     </style></head><body><nav><a href="/admin/accounts">계좌</a><a href="/admin/budget">예산</a>
-    <a href="/admin/reports">보고서</a>
+    <a href="/admin/reports">보고서</a><a href="/admin/cards">카드 예정액</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
     <a href="/admin/family">가족 관리</a><a href="/auth/logout">로그아웃</a></nav>
     <h1>${escape(title)}</h1>${content}</body></html>`;
@@ -178,6 +179,51 @@ function renderBudget(book, session, month, message = '') {
     <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th></tr>${rows}</table>`);
 }
 
+function renderCards(book, session, throughDate, message = '') {
+  assertDate(throughDate);
+  const accounts = [...book.accounts().values()];
+  const cards = accounts.filter(a => a.card && a.type === 'liability' &&
+    canAccessAccount(book, session.sub, a.id, 'write'));
+  const cash = accounts.filter(a => a.cash && a.type === 'asset' &&
+    canAccessAccount(book, session.sub, a.id, 'write'));
+  const expenses = accounts.filter(a => a.type === 'expense');
+  const categories = [...book.budgetCategories().values()];
+  const options = values => values.map(a => `<option value="${escape(a.id)}">${escape(a.name)}</option>`).join('');
+  const purchase = cards.length && expenses.length ? `<h2>카드 구매·할부 등록</h2>
+    <form method="post" action="/admin/cards/purchase">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    <input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>카드</label><select name="cardId">${options(cards)}</select>
+    <label>구매일</label><input type="date" name="date" required>
+    <label>비용 계정</label><select name="expenseId">${options(expenses)}</select>
+    <label>금액 (사칙연산 가능)</label><input name="amountExpression" required>
+    <label>할부 개월 수 (일시불은 1)</label><input type="number" name="count" min="1" max="120" value="1" required>
+    <label>첫 결제 예정일</label><input type="date" name="firstDueDate" required>
+    <label>예산 카테고리 (온버짓 카드만)</label><select name="categoryId"><option value="">없음</option>${options(categories)}</select>
+    <label>메모</label><input name="memo"><button>구매 저장</button></form>` :
+    '<p>카드와 비용 계정을 등록해야 구매 내역을 입력할 수 있습니다.</p>';
+  const schedule = visibleCardSchedule(book, session.sub, throughDate);
+  const grouped = new Map();
+  for (const row of schedule) grouped.set(row.dueDate.slice(0, 7),
+    (grouped.get(row.dueDate.slice(0, 7)) ?? 0) + row.amount);
+  const months = [...grouped].map(([month, total]) =>
+    `<tr><td>${escape(month)}</td><td>${escape(total.toLocaleString('ko-KR'))}원</td></tr>`).join('');
+  const rows = schedule.map(row => `<tr><td>${escape(row.dueDate)}</td>
+    <td>${escape(accounts.find(a => a.id === row.cardId)?.name ?? '')}</td>
+    <td>${escape(row.memo)}</td><td>${row.index}회차</td>
+    <td>${escape(row.amount.toLocaleString('ko-KR'))}원</td><td>${cash.length &&
+      canAccessAccount(book, session.sub, row.cardId, 'write') ?
+      `<form method="post" action="/admin/cards/pay"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="planId" value="${escape(row.planId)}"><input type="hidden" name="index" value="${row.index}">
+      <label>실제 결제일</label><input type="date" name="date" value="${escape(row.dueDate)}" required>
+      <label>출금 계좌</label><select name="cashId">${options(cash)}</select><button>결제 기록</button></form>` : ''}</td></tr>`).join('');
+  return page('카드 예정액', `${message}${purchase}<h2>미결제 할부 예정액</h2>
+    <form method="get" action="/admin/cards"><label>조회 종료일</label>
+    <input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
+    <table><tr><th>월</th><th>결제 예정액</th></tr>${months}</table>
+    <table><tr><th>예정일</th><th>카드</th><th>메모</th><th>회차</th><th>금액</th><th>결제</th></tr>${rows}</table>`);
+}
+
 function sendHtml(res, status, html) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -296,6 +342,32 @@ export async function handleAdmin(book, auth, req, res, pathname) {
   const session = auth.session(req);
   if (!session) { res.writeHead(302, { Location: '/auth/login', 'Cache-Control': 'no-store' }); res.end(); return true; }
   try {
+    if (req.method === 'GET' && pathname === '/admin/cards') {
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+      const throughDate = new URL(req.url, 'http://localhost').searchParams.get('throughDate') ||
+        `${Number(today.slice(0, 4)) + 1}-${today.slice(5, 7)}-${today.slice(8, 10)}`;
+      sendHtml(res, 200, renderCards(book, session, throughDate)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/cards/purchase', '/admin/cards/pay'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) {
+        sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
+      }
+      const result = pathname.endsWith('purchase') ? recordCardPurchase(book, session.sub, {
+        requestId: form.get('requestId'), date: form.get('date'), cardId: form.get('cardId'),
+        expenseId: form.get('expenseId'), amountExpression: form.get('amountExpression'),
+        count: form.get('count'), firstDueDate: form.get('firstDueDate'),
+        categoryId: form.get('categoryId') || null, memo: form.get('memo') || '',
+      }) : recordCardPayment(book, session.sub, {
+        planId: form.get('planId'), index: Number(form.get('index')),
+        date: form.get('date'), cashId: form.get('cashId'),
+      });
+      const throughDate = pathname.endsWith('purchase') ?
+        result.plan.installments.at(-1).dueDate : '9999-12-31';
+      sendHtml(res, 200, renderCards(book, session, throughDate,
+        '<p class="notice">카드 거래를 기록했습니다.</p>'));
+      return true;
+    }
     if (req.method === 'GET' && pathname === '/admin/assets/split.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8',
         'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
