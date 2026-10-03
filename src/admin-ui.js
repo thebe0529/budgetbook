@@ -19,6 +19,7 @@ import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } fr
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage } from './register-view.js';
+import { compareStatement } from './statement-comparison.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -34,7 +35,7 @@ function page(title, content) {
     .notice{padding:1rem;background:#eaf5ed}.error{padding:1rem;background:#ffedeb}
     table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #d8e1eb;padding:.5rem;text-align:left}
     </style></head><body><nav><a href="/admin/accounts">계좌</a><a href="/admin/budget">예산</a>
-    <a href="/admin/reports">보고서</a><a href="/admin/adjustments">일괄 조정</a>
+    <a href="/admin/reports">보고서</a><a href="/admin/balance-check">명세서 잔액 비교</a><a href="/admin/adjustments">일괄 조정</a>
     <a href="/admin/cards">카드 예정액</a>
     <a href="/admin/forecast">현금흐름 예상</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
@@ -133,12 +134,46 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <label>종료일</label><input type="date" name="throughDate" value="${escape(filters.throughDate)}">
     <label>메모 검색</label><input name="memo" maxlength="200" value="${escape(filters.memo)}"><button>조회</button></form>
     <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원 · 확인 거래 누적 합계: ${register.checkedBalance.toLocaleString('ko-KR')}원 · 미확인 ${register.uncheckedCount}건</p>
+    <p><a href="/admin/balance-check?accountId=${encodeURIComponent(selected.id)}">이 계좌의 명세서 잔액 비교</a></p>
     <p>은행 내역과 대조한 거래를 확인 표시하세요. 거래가 수정되면 표시를 다시 확인해야 합니다. 확인 표시는 원장 잔액을 변경하지 않습니다.</p>${input}
     <h2>거래 목록</h2><p>조건에 맞는 ${view.total}건 · 검색 거래 증감 합계: ${view.movement.toLocaleString('ko-KR')}원 · 페이지당 최대 200건. 잔액은 검색 조건과 무관한 전체 원장 기준입니다.</p>${navigation}
     ${writable ? `<form id="confirm-selected" method="post" action="/admin/register/check-selected">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
     ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
+}
+
+function renderBalanceCheck(book, session, query) {
+  const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
+  const accountId = query.get('accountId');
+  if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
+  const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
+  if (!selected) return page('명세서 잔액 비교', '<p>볼 수 있는 계좌가 없습니다.</p>');
+  const throughDate = query.get('throughDate') || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  assertDate(throughDate);
+  const expression = query.get('statementBalance') || '';
+  let result = '';
+  if (expression.trim()) {
+    const comparison = compareStatement(book, session.sub, selected.id, throughDate, expression);
+    const money = amount => `${amount.toLocaleString('ko-KR')}원`;
+    const link = status => `/admin/register?${escape(new URLSearchParams({ accountId: selected.id, throughDate, status }).toString())}`;
+    result = `<h2>비교 결과</h2><table><tr><th>항목</th><th>금액</th></tr>
+      <tr><td>명세서 잔액</td><td>${money(comparison.statementBalance)}</td></tr>
+      <tr><td>기준일 원장 잔액</td><td>${money(comparison.ledgerBalance)}</td></tr>
+      <tr><td>차이 (명세서 − 원장)</td><td>${money(comparison.difference)}</td></tr>
+      <tr><td>확인 거래 누적 합계</td><td>${money(comparison.checkedBalance)}</td></tr>
+      <tr><td>미확인 거래 증감 합계</td><td>${money(comparison.uncheckedMovement)}</td></tr></table>
+      <p class="${comparison.difference === 0 ? 'notice' : 'error'}">${comparison.difference === 0 ? '기준일 잔액이 일치합니다.' : '기준일 잔액에 차이가 있습니다. 누락·중복 거래와 거래일을 확인하세요.'}</p>
+      <p>기준일까지 ${comparison.transactionCount}건 중 미확인 ${comparison.uncheckedCount}건입니다. 잔액이 일치해도 거래별 확인이 완료된 것은 아닙니다.</p>
+      <p><a href="${link('unchecked')}">기준일까지의 미확인 거래 조회</a> · <a href="${link('all')}">기준일까지의 전체 거래 조회</a></p>`;
+  }
+  return page('명세서 잔액 비교', `<form method="get" action="/admin/balance-check">
+    <label>계좌</label><select name="accountId">${accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
+    <label>기준일 (당일 거래 포함)</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
+    <label>명세서 잔액 (원, 사칙연산 가능)</label><input name="statementBalance" maxlength="256" value="${escape(expression)}" required>
+    <button>잔액 비교</button></form>
+    <p>예금은 보유 잔액을, 카드·대출은 남은 채무를 양수로 입력하세요. 초과 입금 등 반대 잔액은 음수로 입력할 수 있습니다.</p>
+    <p>기준일까지의 기초 잔액을 포함한 모든 거래로 비교합니다. 비교 결과는 조회용이며 거래 확인 표시나 원장 금액을 변경하지 않습니다.</p>${result}`);
 }
 
 function renderSplit(book, session, accountId, entryId = null, message = '') {
@@ -850,6 +885,10 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/accounts') {
       sendHtml(res, 200, renderAccounts(book, session)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/balance-check') {
+      sendHtml(res, 200, renderBalanceCheck(book, session, new URL(req.url, 'http://localhost').searchParams));
+      return true;
     }
     if (req.method === 'GET' && pathname === '/admin/register') {
       const query = new URL(req.url, 'http://localhost').searchParams;
