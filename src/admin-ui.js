@@ -15,6 +15,7 @@ import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccur
 import { accountActivity, detailedReports } from './report-details.js';
 import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
+import { copyPreviousBudget, previousBudgetPreview } from './budget-actions.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -309,6 +310,7 @@ function renderBudget(book, session, month, message = '') {
   assertMonth(month);
   if (session.role !== 'owner') throw new Error('Owner access required');
   const budget = book.budget(month);
+  const preview = previousBudgetPreview(book, session.sub, month);
   const rows = Object.values(budget.categories).map(category => `<tr><td>${escape(category.name)}</td>
     <td>${category.budgeted.toLocaleString('ko-KR')}</td>
     <td>${category.spent.toLocaleString('ko-KR')}</td>
@@ -322,6 +324,11 @@ function renderBudget(book, session, month, message = '') {
     <label>월</label><input type="month" name="month" value="${escape(month)}"><button>조회</button></form>
     <p>온버짓 가용 자금: ${budget.availableFunds.toLocaleString('ko-KR')}원 ·
       미배정 자금: ${budget.readyToAssign.toLocaleString('ko-KR')}원</p>
+    <form method="post" action="/admin/budget/copy-previous">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
+      <p>${escape(preview.fromMonth ?? '이전 달 없음')} 배정액에서 아직 입력하지 않은 ${preview.rows.length}항목,
+      총 ${preview.total.toLocaleString('ko-KR')}원을 복사합니다. 이번 달에 입력한 금액은 0원도 그대로 유지합니다.</p>
+      <button ${preview.rows.length ? '' : 'disabled'}>이전 달 예산 복사</button></form>
     <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th></tr>${rows}</table>`);
 }
 
@@ -777,6 +784,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
       const month = new URL(req.url, 'http://localhost').searchParams.get('month') || today.slice(0, 7);
       sendHtml(res, 200, renderBudget(book, session, month)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/budget/copy-previous') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const month = form.get('month');
+      const result = copyPreviousBudget(book, session.sub, month);
+      sendHtml(res, 200, renderBudget(book, session, month,
+        `<p class="notice">${result.count}항목, ${result.total.toLocaleString('ko-KR')}원을 복사했습니다.</p>`));
+      return true;
     }
     if (req.method === 'POST' && pathname === '/admin/budget') {
       const form = await formBody(req);
