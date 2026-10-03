@@ -119,10 +119,10 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
     (['asset', 'liability'].includes(a.type) && a.id !== accountId &&
       canAccessAccount(book, session.sub, a.id, 'write')));
   const categories = [...book.budgetCategories().values()];
-  const options = selected => counters.map(a => `<option value="${escape(a.id)}" data-type="${a.type}"
+  const options = selected => counters.map(a => `<option value="${escape(a.id)}" data-type="${a.type}" data-name="${escape(a.name)}"
     ${a.id === selected ? 'selected' : ''}>${escape(a.name)} (${a.type})</option>`).join('');
   const categoryOptions = selected => '<option value="">없음</option>' + categories.map(c =>
-    `<option value="${escape(c.id)}" ${c.id === selected ? 'selected' : ''}>${escape(c.name)}</option>`).join('');
+    `<option value="${escape(c.id)}" data-name="${escape(c.name)}" ${c.id === selected ? 'selected' : ''}>${escape(c.name)}</option>`).join('');
   const counterLines = existing?.postings.filter(p => p.accountId !== accountId) ?? [null, null];
   const rows = counterLines.map((line, index) => `<tr><td><select name="counterId">${options(line?.accountId)}</select></td>
     <td><input name="lineAmount" value="${escape(line?.amount ?? '')}" required></td>
@@ -131,7 +131,12 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
   return page(entryId ? '분할 거래 수정' : '분할 거래 입력', `${message}
     <p>원천 계좌: ${escape(account.name)} · 상대 계정을 행으로 추가합니다. 각 행의 합계를 원천 계좌에 한 번 반영합니다.</p>
     <p id="split-keyboard-help">Tab: 다음 입력칸 · Enter: 아래 행의 같은 입력칸 (마지막 행은 추가) · Shift+Enter: 위 행 · Ctrl+Enter 또는 ⌘+Enter: 저장. 최대 50행입니다.</p>
-    <form id="split-form" method="post" action="${entryId ? '/admin/split/update' : '/admin/split'}">
+    <details><summary>엑셀 행 붙여넣기</summary>
+      <p>머리글 없이 상대 계정 이름(또는 ID), 금액 식, 예산 카테고리 이름(선택)을 탭으로 구분해 2~50행을 붙여넣으세요. 아래 버튼을 누르면 현재 표를 교체합니다. 이름이 중복되면 ID를 사용하세요.</p>
+      <textarea id="split-paste" rows="5" aria-label="분할 거래 붙여넣기"></textarea>
+      <button type="button" id="apply-split-paste">붙여넣기로 현재 표 교체</button>
+      <p id="split-paste-notice" role="status"></p></details>
+    <form id="split-form" data-on-budget="${account.onBudget === true}" method="post" action="${entryId ? '/admin/split/update' : '/admin/split'}">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="accountId" value="${escape(accountId)}">
       ${entryId ? `<input type="hidden" name="entryId" value="${escape(entryId)}">
@@ -147,7 +152,7 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
       <button>분할 거래 ${entryId ? '수정' : '저장'}</button>
     </form><template id="counter-template"><select name="counterId">${options()}</select></template>
     <template id="category-template"><select name="lineCategory">${categoryOptions()}</select></template>
-    <script defer src="/admin/assets/split.js"></script>`);
+    <script type="module" src="/admin/assets/split.js"></script>`);
 }
 
 function renderReports(book, session, fromDate, throughDate, message = '') {
@@ -682,10 +687,12 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         '<p class="notice">카드 거래를 기록했습니다.</p>'));
       return true;
     }
-    if (req.method === 'GET' && pathname === '/admin/assets/split.js') {
+    if (req.method === 'GET' && ['/admin/assets/split.js', '/admin/assets/split-paste.js',
+      '/admin/assets/amount-expression.js'].includes(pathname)) {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8',
         'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
-      res.end(readFileSync(new URL('./split-ui.js', import.meta.url)));
+      const file = pathname.endsWith('/split.js') ? 'split-ui.js' : pathname.split('/').at(-1);
+      res.end(readFileSync(new URL(`./${file}`, import.meta.url)));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/split') {

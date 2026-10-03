@@ -1,3 +1,5 @@
+import { parseSplitPaste } from './split-paste.js';
+
 const form = document.querySelector('#split-form');
 const rows = document.querySelector('#split-rows');
 const kind = form?.querySelector('[name="kind"]');
@@ -41,7 +43,7 @@ function filterOptions() {
     }
   }
   for (const select of rows.querySelectorAll('[name="lineCategory"]')) {
-    select.disabled = kind.value !== 'expense';
+    select.disabled = kind.value !== 'expense' || form.dataset.onBudget !== 'true';
     if (select.disabled) select.value = '';
   }
 }
@@ -51,6 +53,28 @@ for (const button of rows?.querySelectorAll('[data-remove-row]') ?? []) {
   button.addEventListener('click', () => { if (rows.children.length > 2) button.closest('tr').remove(); });
 }
 kind?.addEventListener('change', filterOptions);
+document.querySelector('#apply-split-paste')?.addEventListener('click', () => {
+  const notice = document.querySelector('#split-paste-notice');
+  const choices = template => [...template.content.firstElementChild.options]
+    .filter(option => option.value).map(option => ({ id: option.value,
+      name: option.dataset.name ?? option.textContent.trim(), type: option.dataset.type }));
+  try {
+    const parsed = parseSplitPaste(document.querySelector('#split-paste').value, {
+      counters: choices(counterTemplate).filter(item => kind.value === 'transfer' ?
+        ['asset', 'liability'].includes(item.type) : item.type === kind.value),
+      categories: choices(categoryTemplate),
+      allowCategories: kind.value === 'expense' && form.dataset.onBudget === 'true',
+    });
+    rows.replaceChildren();
+    for (const item of parsed) {
+      const row = addRow();
+      row.querySelector('[name="counterId"]').value = item.counterId;
+      row.querySelector('[name="lineAmount"]').value = item.amountExpression;
+      row.querySelector('[name="lineCategory"]').value = item.categoryId;
+    }
+    notice.textContent = `${parsed.length}행을 표에 넣었습니다. 내용을 확인한 뒤 저장하세요.`;
+  } catch (error) { notice.textContent = error.message; }
+});
 form?.addEventListener('keydown', event => {
   if (event.isComposing || event.key !== 'Enter') return;
   if (event.ctrlKey || event.metaKey) {
