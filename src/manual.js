@@ -9,6 +9,31 @@ export function createGroup(book, userSub, name, type) {
   return book.createAccountGroup({ id: randomUUID(), name: name.trim(), type });
 }
 
+export function renameGroup(book, userSub, groupId, name) {
+  if (member(book, userSub)?.role !== 'owner') throw new Error('Owner access required');
+  if (typeof name !== 'string' || !name.trim() || name.length > 80) throw new Error('Invalid group name');
+  const group = book.accountGroups().find(g => g.id === groupId);
+  if (!group) throw new Error('Unknown account group');
+  const next = { ...group, name: name.trim() };
+  book.db.prepare('UPDATE account_groups SET data = ? WHERE id = ?').run(JSON.stringify(next), groupId);
+  return next;
+}
+
+export function moveAccountGroup(book, userSub, accountId, groupId) {
+  if (member(book, userSub)?.role !== 'owner') throw new Error('Owner access required');
+  const account = book.accounts().get(accountId);
+  if (!account || !['asset', 'liability'].includes(account.type)) throw new Error('Invalid group account');
+  if (groupId) {
+    const group = book.accountGroups().find(g => g.id === groupId);
+    if (!group || group.type !== account.type) throw new Error('Account group type mismatch');
+  }
+  const next = { ...account };
+  if (groupId) next.groupId = groupId;
+  else delete next.groupId;
+  book.db.prepare('UPDATE accounts SET data = ? WHERE id = ?').run(JSON.stringify(next), accountId);
+  return next;
+}
+
 export function createLedgerAccount(book, userSub, options) {
   if (member(book, userSub)?.role !== 'owner') throw new Error('Owner access required');
   const { name, type, groupId, onBudget, cash, card } = options;

@@ -4,7 +4,7 @@ import { canAccessAccount, member, removeMember, setMember, visibleAccounts } fr
 import { approveEvent, listReviewEvents } from './review.js';
 import { randomUUID } from 'node:crypto';
 import { accountOverview, accountRegister, createCategory, createGroup,
-  createLedgerAccount, recordManual } from './manual.js';
+  createLedgerAccount, moveAccountGroup, renameGroup, recordManual } from './manual.js';
 import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
@@ -42,8 +42,14 @@ function page(title, content) {
 
 function renderAccounts(book, session, message = '') {
   const overview = accountOverview(book, session.sub, '9999-12-31');
+  const allGroups = book.accountGroups();
+  const accountMap = book.accounts();
+  const groupControls = a => session.role !== 'owner' ? '' : `<form method="post" action="/admin/accounts/group">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(a.id)}">
+    <select name="groupId" aria-label="${escape(a.name)} 그룹"><option value="">그룹 없음</option>${allGroups.filter(g => g.type === a.type)
+      .map(g => `<option value="${escape(g.id)}" ${accountMap.get(a.id)?.groupId === g.id ? 'selected' : ''}>${escape(g.name)}</option>`).join('')}</select><button>그룹 변경</button></form>`;
   const rows = overview.map(a => `<tr><td><a href="/admin/register?accountId=${encodeURIComponent(a.id)}">${escape(a.name)}</a></td>
-    <td>${escape(a.type)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}원</td></tr>`).join('');
+    <td>${escape(a.type)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}원</td><td>${groupControls(a)}</td></tr>`).join('');
   const typeOptions = ['asset', 'liability', 'equity', 'income', 'expense']
     .map(type => `<option value="${type}">${type}</option>`).join('');
   const groups = book.accountGroups().map(g => `<option value="${escape(g.id)}">${escape(g.name)} (${g.type})</option>`).join('');
@@ -51,6 +57,9 @@ function renderAccounts(book, session, message = '') {
     <form method="post" action="/admin/groups"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <label>그룹 이름</label><input name="name" required><label>그룹 유형</label>
       <select name="type"><option value="asset">자산</option><option value="liability">부채</option></select><button>그룹 생성</button></form>
+    <h2>계좌 그룹 이름 변경</h2>${allGroups.map(g => `<form method="post" action="/admin/groups/rename">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="groupId" value="${escape(g.id)}">
+      <label>${escape(g.type)} 그룹 이름</label><input name="name" maxlength="80" value="${escape(g.name)}" required><button>이름 저장</button></form>`).join('')}
     <h2>계좌 추가</h2><form method="post" action="/admin/accounts">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <label>계좌명</label><input name="name" required><label>회계 유형</label><select name="type">${typeOptions}</select>
@@ -62,7 +71,7 @@ function renderAccounts(book, session, message = '') {
     <h2>예산 카테고리 추가</h2><form method="post" action="/admin/categories">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <label>카테고리명</label><input name="name" required><button>카테고리 생성</button></form>`;
-  return page('계좌 관리', `${message}<table><thead><tr><th>계좌</th><th>유형</th><th>잔액</th></tr></thead>
+  return page('계좌 관리', `${message}<table><thead><tr><th>계좌</th><th>유형</th><th>잔액</th><th>그룹 변경</th></tr></thead>
     <tbody>${rows}</tbody></table>${controls}`);
 }
 
@@ -778,6 +787,16 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       book.assignBudget(month, form.get('categoryId'), amount);
       sendHtml(res, 200, renderBudget(book, session, month,
         '<p class="notice">월별 예산을 저장했습니다.</p>'));
+      return true;
+    }
+    if (req.method === 'POST' && ['/admin/groups/rename', '/admin/accounts/group'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) {
+        sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
+      }
+      if (pathname.endsWith('/rename')) renameGroup(book, session.sub, form.get('groupId'), form.get('name'));
+      else moveAccountGroup(book, session.sub, form.get('accountId'), form.get('groupId') || null);
+      sendHtml(res, 200, renderAccounts(book, session, '<p class="notice">계좌 그룹을 변경했습니다.</p>'));
       return true;
     }
     if (req.method === 'POST' && ['/admin/groups', '/admin/accounts', '/admin/categories',
