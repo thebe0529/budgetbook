@@ -17,6 +17,7 @@ import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
+import { setTransactionChecked } from './transaction-checks.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -108,12 +109,18 @@ function renderRegister(book, session, accountId, message = '') {
       (row.createdBy === session.sub || session.role === 'owner');
     return `<tr><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}</td>
-    <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td></tr>`;
+    <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
+    <td>${row.checked ? '확인 완료' : '미확인'}${canAccessAccount(book, session.sub, selected.id, 'write') ?
+    `<form method="post" action="/admin/register/check"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    <input type="hidden" name="accountId" value="${escape(selected.id)}"><input type="hidden" name="entryId" value="${escape(row.id)}">
+    <input type="hidden" name="expectedHash" value="${escape(row.confirmationHash)}">
+    <input type="hidden" name="checked" value="${row.checked ? 'false' : 'true'}"><button>${row.checked ? '확인 해제' : '거래 확인'}</button></form>` : ''}</td></tr>`;
   }).join('');
   return page(`${selected.name} 거래`, `${message}<form method="get" action="/admin/register">
     <label>계좌</label><select name="accountId">${options}</select><button>조회</button></form>
-    <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원</p>${input}
-    <h2>최근 거래</h2><table><tr><th>일자</th><th>메모</th><th>증감</th><th>잔액</th></tr>${rows}</table>`);
+    <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원 · 확인 거래 누적 합계: ${register.checkedBalance.toLocaleString('ko-KR')}원 · 미확인 ${register.uncheckedCount}건</p>
+    <p>은행 내역과 대조한 거래를 확인 표시하세요. 거래가 수정되면 표시를 다시 확인해야 합니다. 확인 표시는 원장 잔액을 변경하지 않습니다.</p>${input}
+    <h2>최근 거래</h2><table><tr><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>`);
 }
 
 function renderSplit(book, session, accountId, entryId = null, message = '') {
@@ -829,6 +836,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && pathname === '/admin/register') {
       const accountId = new URL(req.url, 'http://localhost').searchParams.get('accountId');
       sendHtml(res, 200, renderRegister(book, session, accountId)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/register/check') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      if (!['true', 'false'].includes(form.get('checked'))) throw new Error('Invalid confirmation status');
+      const accountId = form.get('accountId');
+      setTransactionChecked(book, session.sub, accountId, form.get('entryId'), form.get('checked') === 'true', form.get('expectedHash'));
+      sendHtml(res, 200, renderRegister(book, session, accountId, '<p class="notice">거래 확인 상태를 저장했습니다.</p>'));
+      return true;
     }
     if (req.method === 'GET' && pathname === '/admin/reports') {
       const query = new URL(req.url, 'http://localhost').searchParams;

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { assertDate } from './ledger.js';
 import { calculateAmount } from './amount-expression.js';
 import { canAccessAccount, member, visibleAccounts } from './members.js';
+import { entryFingerprint } from './transaction-checks.js';
 
 export function createGroup(book, userSub, name, type) {
   if (member(book, userSub)?.role !== 'owner') throw new Error('Owner access required');
@@ -113,6 +114,9 @@ export function accountRegister(book, userSub, accountId, throughDate) {
   const account = book.accounts().get(accountId);
   const normalDebit = account.type === 'asset';
   let balance = 0;
+  let checkedBalance = 0;
+  const checks = new Map(book.db.prepare('SELECT entry_id, entry_hash FROM account_entry_checks WHERE account_id = ?')
+    .all(accountId).map(row => [row.entry_id, row.entry_hash]));
   const rows = [];
   for (const entry of book.entries()) {
     if (entry.date > throughDate) continue;
@@ -120,11 +124,14 @@ export function accountRegister(book, userSub, accountId, throughDate) {
       .reduce((n, p) => n + p.amount * ((p.side === 'debit') === normalDebit ? 1 : -1), 0);
     if (!movement) continue;
     balance += movement;
+    const checked = checks.get(entry.id) === entryFingerprint(entry);
+    if (checked) checkedBalance += movement;
     rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance,
-      kind: entry.kind, sourceAccountId: entry.sourceAccountId, createdBy: entry.createdBy });
+      kind: entry.kind, sourceAccountId: entry.sourceAccountId, createdBy: entry.createdBy, checked,
+      confirmationHash: entryFingerprint(entry) });
   }
   return { account: { id: account.id, name: account.name, type: account.type },
-    balance, rows: rows.reverse() };
+    balance, checkedBalance, uncheckedCount: rows.filter(row => !row.checked).length, rows: rows.reverse() };
 }
 
 export function accountOverview(book, userSub, throughDate) {
