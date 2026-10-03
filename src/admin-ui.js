@@ -418,9 +418,16 @@ function renderForecast(book, session, query, message = '') {
   const cash = [...book.accounts().values()].filter(a => a.cash);
   const schedules = listSchedules(book, session.sub);
   const cardCashId = query.get('cardCashId') || '';
+  const cardMode = query.get('cardMode') || (cardCashId ? 'override' : 'defaults');
+  if (!['defaults', 'override', 'exclude'].includes(cardMode)) throw new Error('Invalid card forecast mode');
+  if (cardMode === 'override' && !cardCashId) throw new Error('Select a common card cash account');
   const overrides = Object.fromEntries(schedules.filter(s => query.has(`amount_${s.id}`))
     .map(s => [s.id, query.get(`amount_${s.id}`)]));
-  const result = forecast(book, session.sub, { asOf, throughDate, cardCashId, overrides });
+  const result = forecast(book, session.sub, { asOf, throughDate,
+    cardCashId: cardMode === 'override' ? cardCashId : undefined,
+    useCardDefaults: cardMode === 'defaults', overrides });
+  const missingCards = result.missingCardAccounts.map(item => `<li>${escape(item.name)}:
+    ${item.count}회차, ${item.amount.toLocaleString('ko-KR')}원</li>`).join('');
   const cashOptions = cash.map(a => `<option value="${escape(a.id)}" ${a.id === cardCashId ? 'selected' : ''}>
     ${escape(a.name)}</option>`).join('');
   const accountOptions = cash.map(a => `<option value="${escape(a.id)}">${escape(a.name)}</option>`).join('');
@@ -454,6 +461,7 @@ function renderForecast(book, session, query, message = '') {
       <input type="hidden" name="asOf" value="${escape(asOf)}">
       <input type="hidden" name="throughDate" value="${escape(throughDate)}">
       <input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
+      <input type="hidden" name="cardMode" value="${escape(cardMode)}">
       <select name="entryId">${candidates.map(entry => `<option value="${escape(entry.id)}">
       ${escape(entry.date)} ${escape(entry.memo ?? entry.id)}</option>`).join('')}</select>
       <button>실제 거래 연결</button></form>` : '';
@@ -469,6 +477,8 @@ function renderForecast(book, session, query, message = '') {
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="scheduleId" value="${escape(row.schedule_id)}">
       <input type="hidden" name="date" value="${escape(row.occurrence_date)}"><button>연결 해제</button>
+      <input type="hidden" name="asOf" value="${escape(asOf)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
+      <input type="hidden" name="cardMode" value="${escape(cardMode)}"><input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
     </form></td></tr>`).join('');
   const autoForms = schedules.filter(s => s.active).map(s => {
     const dates = result.events.filter(e => e.scheduleId === s.id).map(e => e.date);
@@ -477,15 +487,21 @@ function renderForecast(book, session, query, message = '') {
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="scheduleId" value="${escape(s.id)}">
       ${dates.map(date => `<input type="hidden" name="date" value="${escape(date)}">`).join('')}
       <input type="hidden" name="asOf" value="${escape(asOf)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
+      <input type="hidden" name="cardMode" value="${escape(cardMode)}"><input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
       <button>자동 매칭: ${escape(s.name)}</button></form>`;
   }).join('');
   return page('현금흐름 예상', `${message}<p>현금성 계좌 합계: 시작 ${result.openingTotal.toLocaleString('ko-KR')}원 →
     종료 예상 ${result.projectedTotal.toLocaleString('ko-KR')}원</p>
+    ${missingCards ? `<p class="error">기본 출금 계좌가 없어 예상에 포함되지 않은 카드 예정액입니다. <a href="/admin/cards">카드 설정</a>에서 계좌를 지정하세요.</p><ul>${missingCards}</ul>` : ''}
     <p>예정 거래는 실제 원장에 기록되지 않습니다. 이미 입력한 미래 일자 거래는 별도 확정 거래로 표시됩니다.</p>
     <h2>조회·임시 시뮬레이션</h2><form method="get" action="/admin/forecast">
       <label>기준일</label><input type="date" name="asOf" value="${escape(asOf)}" required>
       <label>종료일 (최대 10년)</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
-      <label>카드 결제 출금 예상 계좌</label><select name="cardCashId"><option value="">카드 예상액 제외</option>
+      <label>카드 예상 방식</label><select name="cardMode">
+      <option value="defaults" ${cardMode === 'defaults' ? 'selected' : ''}>카드별 기본 출금 계좌</option>
+      <option value="override" ${cardMode === 'override' ? 'selected' : ''}>공통 출금 계좌로 시뮬레이션</option>
+      <option value="exclude" ${cardMode === 'exclude' ? 'selected' : ''}>카드 예정액 제외</option></select>
+      <label>시뮬레이션 공통 출금 계좌</label><select name="cardCashId"><option value="">계좌 선택</option>
       ${cashOptions}</select>${overrideInputs}<button>다시 계산</button></form>
     <h2>예정 거래 추가</h2><form method="post" action="/admin/forecast/schedules">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
@@ -706,6 +722,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       sendHtml(res, 200, renderForecast(book, session, new URLSearchParams({
         asOf: form.get('asOf') || '', throughDate: form.get('throughDate') || '',
         cardCashId: form.get('cardCashId') || '',
+        cardMode: form.get('cardMode') || (form.get('cardCashId') ? 'override' : 'defaults'),
       }),
         '<p class="notice">예정 거래를 변경했습니다.</p>'));
       return true;

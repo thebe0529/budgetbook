@@ -5,7 +5,7 @@ import { ensureOwner, setMember } from '../src/members.js';
 import { createLedgerAccount, recordManual } from '../src/manual.js';
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, matchingEntries,
   saveSchedule, unlinkOccurrence } from '../src/forecast.js';
-import { recordCardPurchase } from '../src/card-manual.js';
+import { recordCardPurchase, setCardCashDefault, cardCashDefault } from '../src/card-manual.js';
 import { createImportApi } from '../src/import-api.js';
 import { randomUUID } from 'node:crypto';
 
@@ -157,4 +157,55 @@ test('automatic matching leaves overlapping monthly candidates for manual review
     assert.deepEqual(autoLinkMatches(book, 'owner', { scheduleId: schedule.id,
       dates: ['2026-11-25'] }), []);
   } finally { book.close(); }
+});
+
+test('forecast applies separate card cash defaults, reports unconfigured amounts and preserves settings in simulations', () => {
+  const book = new Book();
+  try {
+    ensureOwner(book, 'owner');
+    const a = createLedgerAccount(book, 'owner', { name: '은행 A', type: 'asset', cash: true });
+    const b = createLedgerAccount(book, 'owner', { name: '은행 B', type: 'asset', cash: true });
+    const expense = createLedgerAccount(book, 'owner', { name: '비용', type: 'expense' });
+    const cards = ['A', 'B', '미설정'].map(name => createLedgerAccount(book, 'owner',
+      { name, type: 'liability', card: true }));
+    for (const [i, card] of cards.entries()) recordCardPurchase(book, 'owner', {
+      requestId: randomUUID(), date: '2026-10-03', cardId: card.id, expenseId: expense.id,
+      amountExpression: String([2000, 6000, 4000][i]), count: i === 0 ? '2' : '1', firstDueDate: '2026-11-25' });
+    setCardCashDefault(book, 'owner', cards[0].id, a.id);
+    setCardCashDefault(book, 'owner', cards[1].id, b.id);
+    const args = { asOf: '2026-11-01', throughDate: '2026-12-31' };
+    const result = forecast(book, 'owner', { ...args, useCardDefaults: true });
+    assert.equal(result.projected[a.id], -2000);
+    assert.equal(result.projected[b.id], -6000);
+    assert.deepEqual(result.missingCardAccounts, [{ cardId: cards[2].id, name: '미설정', count: 1, amount: 4000 }]);
+    const simulated = forecast(book, 'owner', { ...args, cardCashId: a.id });
+    assert.equal(simulated.projected[a.id], -12000);
+    assert.equal(simulated.missingCardAccounts.length, 0);
+    assert.equal(forecast(book, 'owner', args).events.length, 0);
+    assert.equal(cardCashDefault(book, 'owner', cards[1].id), b.id);
+    assert.equal(book.entries().length, 3);
+    assert.throws(() => forecast(book, 'owner', { ...args, useCardDefaults: true, cardCashId: a.id }), /mode/);
+  } finally { book.close(); }
+});
+
+test('forecast page shows card defaults mode and amounts omitted for missing cash accounts', async () => {
+  const book = new Book();
+  ensureOwner(book, 'owner');
+  const card = createLedgerAccount(book, 'owner', { name: '미설정 카드', type: 'liability', card: true });
+  const expense = createLedgerAccount(book, 'owner', { name: '비용', type: 'expense' });
+  recordCardPurchase(book, 'owner', { requestId: randomUUID(), date: '2026-10-03', cardId: card.id,
+    expenseId: expense.id, amountExpression: '1000', count: '1', firstDueDate: '2026-11-25' });
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'owner', role: 'owner', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/admin/forecast?asOf=2026-11-01&throughDate=2026-12-31`;
+  try {
+    const response = await fetch(url);
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, /value="defaults" selected/);
+    assert.match(html, /예상에 포함되지 않은/);
+    assert.match(html, /1회차, 1,000원/);
+    const excluded = await fetch(url + '&cardMode=exclude');
+    assert.doesNotMatch(await excluded.text(), /예상에 포함되지 않은/);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });

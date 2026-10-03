@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { assertDate, balances, addMonths } from './ledger.js';
 import { calculateAmount } from './amount-expression.js';
 import { member } from './members.js';
+import { cardCashDefault } from './card-manual.js';
 
 const owner = (book, sub) => {
   if (member(book, sub)?.role !== 'owner') throw new Error('Owner access required');
@@ -122,7 +123,7 @@ export function disableSchedule(book, sub, id) {
   return schedule;
 }
 
-export function forecast(book, sub, { asOf, throughDate, cardCashId, overrides = {} }) {
+export function forecast(book, sub, { asOf, throughDate, cardCashId, useCardDefaults = false, overrides = {} }) {
   owner(book, sub);
   assertDate(asOf);
   assertDate(throughDate);
@@ -130,6 +131,7 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, overrides =
   if (throughDate > addMonths(asOf, 120)) throw new Error('Forecast horizon is at most 10 years');
   const accounts = book.accounts();
   const cash = [...accounts.values()].filter(a => a.cash);
+  if (typeof useCardDefaults !== 'boolean' || useCardDefaults && cardCashId) throw new Error('Invalid card forecast mode');
   if (cardCashId && !cash.some(a => a.id === cardCashId)) throw new Error('Invalid card payment account');
   const schedules = listSchedules(book, sub).filter(s => s.active);
   const entries = book.entries();
@@ -163,8 +165,19 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, overrides =
       }
     }
   }
-  if (cardCashId) for (const p of book.pendingCardPayments(throughDate)) {
-    append(p.dueDate, 'card', `${accounts.get(p.cardId)?.name ?? '카드'} ${p.index}회차`, -p.amount, cardCashId);
+  const missingCardAccounts = new Map();
+  if (cardCashId || useCardDefaults) for (const p of book.pendingCardPayments(throughDate)) {
+    if (p.dueDate <= asOf) continue;
+    const accountId = useCardDefaults ? cardCashDefault(book, sub, p.cardId) : cardCashId;
+    if (!accountId) {
+      const missing = missingCardAccounts.get(p.cardId) ?? { cardId: p.cardId,
+        name: accounts.get(p.cardId)?.name ?? '카드', count: 0, amount: 0 };
+      missing.count++;
+      missing.amount += p.amount;
+      missingCardAccounts.set(p.cardId, missing);
+      continue;
+    }
+    append(p.dueDate, 'card', `${accounts.get(p.cardId)?.name ?? '카드'} ${p.index}회차`, -p.amount, accountId);
   }
   for (const entry of entries) {
     if (entry.date <= asOf || entry.date > throughDate) continue;
@@ -182,5 +195,6 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, overrides =
     event.projectedBalance = projected[event.accountId];
   }
   const sum = obj => Object.values(obj).reduce((a, b) => a + b, 0);
-  return { opening, projected, openingTotal: sum(opening), projectedTotal: sum(projected), events };
+  return { opening, projected, openingTotal: sum(opening), projectedTotal: sum(projected), events,
+    missingCardAccounts: [...missingCardAccounts.values()] };
 }
