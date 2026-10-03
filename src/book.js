@@ -21,6 +21,8 @@ export class Book {
       CREATE TABLE IF NOT EXISTS statement_comparisons (id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
         saved_at TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS statement_comparisons_account ON statement_comparisons(account_id, saved_at);
+      CREATE TABLE IF NOT EXISTS statement_reviews (comparison_id TEXT PRIMARY KEY, actor TEXT NOT NULL,
+        completed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_cash_defaults (card_id TEXT PRIMARY KEY, cash_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_payment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);

@@ -19,7 +19,7 @@ import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } fr
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage } from './register-view.js';
-import { compareStatement, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
+import { compareStatement, completeStatementReview, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -175,10 +175,15 @@ function renderBalanceCheck(book, session, query, message = '') {
   const history = statementComparisonHistory(book, session.sub, selected.id).map(saved => {
     const link = `/admin/balance-check?${escape(new URLSearchParams({ accountId: selected.id, throughDate: saved.throughDate,
       statementBalance: saved.statementBalance }).toString())}`;
+    const completion = saved.review ? `<p>${saved.changed ? '완료 후 변경됨 · 재검토 필요' : '검토 완료'}<br>
+      ${escape(saved.review.actor)} · ${escape(saved.review.completedAt)}</p>` :
+      !saved.changed && saved.difference === 0 && saved.uncheckedCount === 0 && canAccessAccount(book, session.sub, selected.id, 'write') ?
+      `<form method="post" action="/admin/balance-check/complete"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="comparisonId" value="${escape(saved.id)}"><button>검토 완료 표시</button></form>` : '';
     return `<tr><td>${escape(saved.throughDate)}</td><td>${saved.statementBalance.toLocaleString('ko-KR')}</td>
       <td>${saved.ledgerBalance.toLocaleString('ko-KR')}</td><td>${saved.difference.toLocaleString('ko-KR')}</td>
       <td>${saved.uncheckedCount}</td><td>${escape(saved.actor)}<br>${escape(saved.savedAt)}</td>
-      <td>${saved.changed ? '저장 후 변경됨' : '저장 당시와 동일'}<br><a href="${link}">현재 상태로 다시 비교</a></td></tr>`;
+      <td>${saved.changed ? '저장 후 변경됨' : '저장 당시와 동일'}${completion}<br><a href="${link}">현재 상태로 다시 비교</a></td></tr>`;
   }).join('');
   return page('명세서 잔액 비교', `${message}<form method="get" action="/admin/balance-check">
     <label>계좌</label><select name="accountId">${accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
@@ -186,7 +191,8 @@ function renderBalanceCheck(book, session, query, message = '') {
     <label>명세서 잔액 (원, 사칙연산 가능)</label><input name="statementBalance" maxlength="256" value="${escape(expression)}" required>
     <button>잔액 비교</button></form>
     <p>예금은 보유 잔액을, 카드·대출은 남은 채무를 양수로 입력하세요. 초과 입금 등 반대 잔액은 음수로 입력할 수 있습니다.</p>
-    <p>기준일까지의 기초 잔액을 포함한 모든 거래로 비교합니다. 결과 저장은 비교 이력을 남기며 거래 확인 표시나 원장 금액을 변경하지 않습니다. 대사 확정이나 기간 잠금은 수행하지 않습니다.</p>${result}
+    <p>기준일까지의 기초 잔액을 포함한 모든 거래로 비교합니다. 결과 저장은 비교 이력을 남기며 거래 확인 표시나 원장 금액을 변경하지 않습니다.</p>
+    <p>잔액 차이가 0원이고 미확인 거래가 없는 이력은 검토 완료로 표시할 수 있습니다. 완료 후 거래나 확인 상태가 바뀌면 다시 검토해야 합니다. 완료 표시는 기간을 잠그지 않습니다.</p>${result}
     <h2>저장한 비교 이력 (최근 20건)</h2><table><tr><th>기준일</th><th>명세서 잔액</th><th>원장 잔액</th><th>차이</th><th>미확인 건수</th><th>저장자·시각 (UTC)</th><th>상태</th></tr>${history || '<tr><td colspan="7">저장한 이력이 없습니다.</td></tr>'}</table>`);
 }
 
@@ -899,6 +905,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/accounts') {
       sendHtml(res, 200, renderAccounts(book, session)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/balance-check/complete') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const { comparison } = completeStatementReview(book, session.sub, form.get('comparisonId'));
+      const query = new URLSearchParams({ accountId: comparison.account.id, throughDate: comparison.throughDate,
+        statementBalance: comparison.statementBalance });
+      sendHtml(res, 200, renderBalanceCheck(book, session, query, '<p class="notice">검토 완료를 표시했습니다.</p>'));
+      return true;
     }
     if (req.method === 'POST' && pathname === '/admin/balance-check/save') {
       const form = await formBody(req);
