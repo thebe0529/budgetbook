@@ -19,7 +19,7 @@ import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } fr
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage } from './register-view.js';
-import { compareStatement } from './statement-comparison.js';
+import { compareStatement, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -143,7 +143,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
 }
 
-function renderBalanceCheck(book, session, query) {
+function renderBalanceCheck(book, session, query, message = '') {
   const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
   const accountId = query.get('accountId');
   if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
@@ -166,14 +166,28 @@ function renderBalanceCheck(book, session, query) {
       <p class="${comparison.difference === 0 ? 'notice' : 'error'}">${comparison.difference === 0 ? '기준일 잔액이 일치합니다.' : '기준일 잔액에 차이가 있습니다. 누락·중복 거래와 거래일을 확인하세요.'}</p>
       <p>기준일까지 ${comparison.transactionCount}건 중 미확인 ${comparison.uncheckedCount}건입니다. 잔액이 일치해도 거래별 확인이 완료된 것은 아닙니다.</p>
       <p><a href="${link('unchecked')}">기준일까지의 미확인 거래 조회</a> · <a href="${link('all')}">기준일까지의 전체 거래 조회</a></p>`;
+    if (canAccessAccount(book, session.sub, selected.id, 'write')) result += `<form method="post" action="/admin/balance-check/save">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="requestId" value="${randomUUID()}">
+      <input type="hidden" name="accountId" value="${escape(selected.id)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
+      <input type="hidden" name="statementBalance" value="${comparison.statementBalance}"><input type="hidden" name="expectedHash" value="${comparison.stateHash}">
+      <button>비교 결과 저장</button></form>`;
   }
-  return page('명세서 잔액 비교', `<form method="get" action="/admin/balance-check">
+  const history = statementComparisonHistory(book, session.sub, selected.id).map(saved => {
+    const link = `/admin/balance-check?${escape(new URLSearchParams({ accountId: selected.id, throughDate: saved.throughDate,
+      statementBalance: saved.statementBalance }).toString())}`;
+    return `<tr><td>${escape(saved.throughDate)}</td><td>${saved.statementBalance.toLocaleString('ko-KR')}</td>
+      <td>${saved.ledgerBalance.toLocaleString('ko-KR')}</td><td>${saved.difference.toLocaleString('ko-KR')}</td>
+      <td>${saved.uncheckedCount}</td><td>${escape(saved.actor)}<br>${escape(saved.savedAt)}</td>
+      <td>${saved.changed ? '저장 후 변경됨' : '저장 당시와 동일'}<br><a href="${link}">현재 상태로 다시 비교</a></td></tr>`;
+  }).join('');
+  return page('명세서 잔액 비교', `${message}<form method="get" action="/admin/balance-check">
     <label>계좌</label><select name="accountId">${accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
     <label>기준일 (당일 거래 포함)</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
     <label>명세서 잔액 (원, 사칙연산 가능)</label><input name="statementBalance" maxlength="256" value="${escape(expression)}" required>
     <button>잔액 비교</button></form>
     <p>예금은 보유 잔액을, 카드·대출은 남은 채무를 양수로 입력하세요. 초과 입금 등 반대 잔액은 음수로 입력할 수 있습니다.</p>
-    <p>기준일까지의 기초 잔액을 포함한 모든 거래로 비교합니다. 비교 결과는 조회용이며 거래 확인 표시나 원장 금액을 변경하지 않습니다.</p>${result}`);
+    <p>기준일까지의 기초 잔액을 포함한 모든 거래로 비교합니다. 결과 저장은 비교 이력을 남기며 거래 확인 표시나 원장 금액을 변경하지 않습니다. 대사 확정이나 기간 잠금은 수행하지 않습니다.</p>${result}
+    <h2>저장한 비교 이력 (최근 20건)</h2><table><tr><th>기준일</th><th>명세서 잔액</th><th>원장 잔액</th><th>차이</th><th>미확인 건수</th><th>저장자·시각 (UTC)</th><th>상태</th></tr>${history || '<tr><td colspan="7">저장한 이력이 없습니다.</td></tr>'}</table>`);
 }
 
 function renderSplit(book, session, accountId, entryId = null, message = '') {
@@ -885,6 +899,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/accounts') {
       sendHtml(res, 200, renderAccounts(book, session)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/balance-check/save') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      saveStatementComparison(book, session.sub, { accountId: form.get('accountId'), throughDate: form.get('throughDate'),
+        statementExpression: form.get('statementBalance'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId') });
+      sendHtml(res, 200, renderBalanceCheck(book, session, form, '<p class="notice">비교 결과 이력을 저장했습니다.</p>'));
+      return true;
     }
     if (req.method === 'GET' && pathname === '/admin/balance-check') {
       sendHtml(res, 200, renderBalanceCheck(book, session, new URL(req.url, 'http://localhost').searchParams));

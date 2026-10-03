@@ -1,13 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Book } from '../src/book.js';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ensureOwner, setMember } from '../src/members.js';
-import { compareStatement } from '../src/statement-comparison.js';
+import { compareStatement, saveStatementComparison, statementComparisonHistory } from '../src/statement-comparison.js';
 import { entryFingerprint, setTransactionChecked } from '../src/transaction-checks.js';
 import { createImportApi } from '../src/import-api.js';
 
-function setup() {
-  const book = new Book();
+function setup(filename) {
+  const book = new Book(filename);
   ensureOwner(book, 'owner');
   for (const [id, name, type] of [['bank', '공유 은행', 'asset'], ['private', '비공개 은행', 'asset'],
     ['card', '신용카드', 'liability'], ['equity', '기초', 'equity'], ['expense', '식비', 'expense']]) {
@@ -43,6 +47,79 @@ test('statement comparison includes opening and cutoff date, separates confirmed
     assert.equal(JSON.stringify(book.entries()), before);
     assert.equal(book.db.prepare('SELECT COUNT(*) AS count FROM account_entry_checks').get().count, 1);
   } finally { book.close(); }
+});
+
+test('saved comparison remains immutable, rejects stale saves and detects later confirmation changes', () => {
+  const book = setup();
+  try {
+    const preview = compareStatement(book, 'owner', 'bank', '2026-10-01', '8500');
+    const input = { accountId: 'bank', throughDate: '2026-10-01', statementExpression: '8500',
+      expectedHash: preview.stateHash, requestId: randomUUID() };
+    const saved = saveStatementComparison(book, 'owner', input);
+    assert.equal(saved.duplicate, false);
+    assert.equal(saved.saved.difference, 500);
+    assert.equal(statementComparisonHistory(book, 'viewer', 'bank')[0].changed, false);
+    const future = book.entries().find(entry => entry.id === 'future');
+    setTransactionChecked(book, 'owner', 'bank', future.id, true, entryFingerprint(future));
+    assert.equal(statementComparisonHistory(book, 'viewer', 'bank')[0].changed, false);
+    const opening = book.entries().find(entry => entry.id === 'opening');
+    setTransactionChecked(book, 'owner', 'bank', opening.id, true, entryFingerprint(opening));
+    assert.equal(statementComparisonHistory(book, 'viewer', 'bank')[0].changed, true);
+    assert.equal(saveStatementComparison(book, 'owner', input).duplicate, true);
+    assert.throws(() => saveStatementComparison(book, 'owner', { ...input, requestId: randomUUID() }), /changed/);
+    assert.throws(() => saveStatementComparison(book, 'owner', { ...input, statementExpression: '8000' }), /reused/);
+    assert.equal(statementComparisonHistory(book, 'viewer', 'bank')[0].uncheckedCount, 2);
+    assert.equal(book.db.prepare('SELECT COUNT(*) AS count FROM statement_comparisons').get().count, 1);
+    assert.equal(book.entries().length, 5);
+  } finally { book.close(); }
+});
+
+test('comparison history persists across reopen and respects read and write permissions', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'comparison-'));
+  const filename = join(directory, 'book.sqlite');
+  let book = setup(filename);
+  try {
+    const input = { accountId: 'bank', throughDate: '2026-10-01', statementExpression: '8000',
+      expectedHash: compareStatement(book, 'owner', 'bank', '2026-10-01', '8000').stateHash, requestId: randomUUID() };
+    assert.throws(() => saveStatementComparison(book, 'viewer', input), /write access/);
+    assert.throws(() => statementComparisonHistory(book, 'viewer', 'private'), /read access/);
+    assert.throws(() => saveStatementComparison(book, 'owner', { ...input, requestId: 'bad' }), /request ID/);
+    saveStatementComparison(book, 'owner', input);
+    book.close(); book = new Book(filename);
+    const saved = statementComparisonHistory(book, 'viewer', 'bank')[0];
+    assert.equal(saved.id, input.requestId);
+    assert.equal(saved.changed, false);
+    book.record({ id: 'backdated', date: '2026-10-01', postings: [
+      { accountId: 'expense', side: 'debit', amount: 100 }, { accountId: 'bank', side: 'credit', amount: 100 }] });
+    assert.equal(statementComparisonHistory(book, 'viewer', 'bank')[0].changed, true);
+    assert.equal(statementComparisonHistory(book, 'viewer', 'bank')[0].ledgerBalance, 8000);
+  } finally { book.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('comparison save endpoint checks CSRF and write access, retries safely and renders history', async () => {
+  const book = setup();
+  setMember(book, 'owner', 'editor', 'editor', ['bank']);
+  const server = createImportApi(book, { auth: { session: req => ({
+    sub: req.headers.cookie === 'viewer=1' ? 'viewer' : 'editor', role: 'editor', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/balance-check`;
+  const body = { csrf: 'token', accountId: 'bank', throughDate: '2026-10-01', statementBalance: '8000',
+    expectedHash: compareStatement(book, 'editor', 'bank', '2026-10-01', '8000').stateHash, requestId: randomUUID() };
+  try {
+    const viewerPage = await (await fetch(`${base}?accountId=bank&statementBalance=8000`, { headers: { Cookie: 'viewer=1' } })).text();
+    assert.ok(!viewerPage.includes('action="/admin/balance-check/save"'));
+    assert.equal((await fetch(`${base}/save`, { method: 'POST', body: new URLSearchParams({ ...body, csrf: 'bad' }) })).status, 403);
+    assert.equal((await fetch(`${base}/save`, { method: 'POST', headers: { Cookie: 'viewer=1' }, body: new URLSearchParams(body) })).status, 400);
+    for (let i = 0; i < 2; i++) {
+      const response = await fetch(`${base}/save`, { method: 'POST', body: new URLSearchParams(body) });
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), /저장 당시와 동일/);
+    }
+    assert.equal(book.db.prepare('SELECT COUNT(*) AS count FROM statement_comparisons').get().count, 1);
+    const stale = await fetch(`${base}/save`, { method: 'POST', body: new URLSearchParams({ ...body,
+      requestId: randomUUID(), expectedHash: 'stale' }) });
+    assert.equal(stale.status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
 
 test('statement comparison uses positive liability balances and rejects unauthorized or invalid comparisons', () => {
