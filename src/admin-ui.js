@@ -15,7 +15,7 @@ import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccur
 import { accountActivity, detailedReports } from './report-details.js';
 import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
-import { copyPreviousBudget, previousBudgetPreview } from './budget-actions.js';
+import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -311,6 +311,12 @@ function renderBudget(book, session, month, message = '') {
   if (session.role !== 'owner') throw new Error('Owner access required');
   const budget = book.budget(month);
   const preview = previousBudgetPreview(book, session.sub, month);
+  const categories = book.budgetCategories();
+  const options = [...categories.values()].map(c => `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
+  const moves = budgetMoves(book, session.sub, month).map(move => `<tr><td>${escape(move.createdAt)}</td>
+    <td>${escape(categories.get(move.payload.fromCategoryId)?.name ?? move.payload.fromCategoryId)}</td>
+    <td>${escape(categories.get(move.payload.toCategoryId)?.name ?? move.payload.toCategoryId)}</td>
+    <td>${move.payload.amount.toLocaleString('ko-KR')}</td></tr>`).join('');
   const rows = Object.values(budget.categories).map(category => `<tr><td>${escape(category.name)}</td>
     <td>${category.budgeted.toLocaleString('ko-KR')}</td>
     <td>${category.spent.toLocaleString('ko-KR')}</td>
@@ -329,7 +335,16 @@ function renderBudget(book, session, month, message = '') {
       <p>${escape(preview.fromMonth ?? '이전 달 없음')} 배정액에서 아직 입력하지 않은 ${preview.rows.length}항목,
       총 ${preview.total.toLocaleString('ko-KR')}원을 복사합니다. 이번 달에 입력한 금액은 0원도 그대로 유지합니다.</p>
       <button ${preview.rows.length ? '' : 'disabled'}>이전 달 예산 복사</button></form>
-    <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th></tr>${rows}</table>`);
+    <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th></tr>${rows}</table>
+    <h2>카테고리 간 예산 이동</h2><p>이번 달 배정액 안에서 이동합니다. 총 배정액은 유지하며, 지출과 이월액은 이동하지 않습니다.</p>
+    <form method="post" action="/admin/budget/move">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
+      <input type="hidden" name="requestId" value="${randomUUID()}">
+      <label>보내는 카테고리</label><select name="fromCategoryId">${options}</select>
+      <label>받는 카테고리</label><select name="toCategoryId">${options}</select>
+      <label>이동 금액 (사칙연산 가능)</label><input name="amountExpression" required>
+      <button ${categories.size < 2 ? 'disabled' : ''}>예산 이동</button></form>
+    <h2>이번 달 최근 이동 기록</h2><table><tr><th>저장 시각 (UTC)</th><th>보내는 항목</th><th>받는 항목</th><th>금액</th></tr>${moves}</table>`);
 }
 
 function renderCards(book, session, throughDate, message = '') {
@@ -792,6 +807,17 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const result = copyPreviousBudget(book, session.sub, month);
       sendHtml(res, 200, renderBudget(book, session, month,
         `<p class="notice">${result.count}항목, ${result.total.toLocaleString('ko-KR')}원을 복사했습니다.</p>`));
+      return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/budget/move') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const month = form.get('month');
+      const result = moveBudget(book, session.sub, { month, requestId: form.get('requestId'),
+        fromCategoryId: form.get('fromCategoryId'), toCategoryId: form.get('toCategoryId'),
+        amountExpression: form.get('amountExpression') });
+      sendHtml(res, 200, renderBudget(book, session, month,
+        `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 예산 이동: ${result.payload.amount.toLocaleString('ko-KR')}원</p>`));
       return true;
     }
     if (req.method === 'POST' && pathname === '/admin/budget') {

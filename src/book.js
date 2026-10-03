@@ -12,6 +12,7 @@ export class Book {
       CREATE TABLE IF NOT EXISTS budget_categories (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS budget_assignments (month TEXT NOT NULL, category_id TEXT NOT NULL,
         amount INTEGER NOT NULL, PRIMARY KEY (month, category_id));
+      CREATE TABLE IF NOT EXISTS budget_moves (id TEXT PRIMARY KEY, month TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cash_schedules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
