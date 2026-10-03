@@ -16,6 +16,7 @@ import { accountActivity, detailedReports } from './report-details.js';
 import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
+import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -311,6 +312,8 @@ function renderBudget(book, session, month, message = '') {
   if (session.role !== 'owner') throw new Error('Owner access required');
   const budget = book.budget(month);
   const preview = previousBudgetPreview(book, session.sub, month);
+  const targetPreview = budgetTargetPreview(book, session.sub, month);
+  const targets = new Map(targetPreview.rows.map(row => [row.categoryId, row]));
   const categories = book.budgetCategories();
   const options = [...categories.values()].map(c => `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
   const moves = budgetMoves(book, session.sub, month).map(move => `<tr><td>${escape(move.createdAt)}</td>
@@ -325,7 +328,11 @@ function renderBudget(book, session, month, message = '') {
       <input type="hidden" name="month" value="${escape(month)}">
       <input type="hidden" name="categoryId" value="${escape(category.categoryId)}">
       <input name="amountExpression" aria-label="${escape(category.name)} 예산" placeholder="월 배정액" required>
-      <button>배정</button></form></td></tr>`).join('');
+      <button>배정</button></form></td>
+    <td><form method="post" action="/admin/budget/target"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="categoryId" value="${escape(category.categoryId)}">
+      <input name="amountExpression" aria-label="${escape(category.name)} 매월 배정 목표" value="${targets.get(category.categoryId)?.target ?? 0}" required>
+      <button>목표 저장</button></form>부족 배정 ${((targets.get(category.categoryId)?.needed) ?? 0).toLocaleString('ko-KR')}원</td></tr>`).join('');
   return page('월별 예산', `${message}<form method="get" action="/admin/budget">
     <label>월</label><input type="month" name="month" value="${escape(month)}"><button>조회</button></form>
     <p>온버짓 가용 자금: ${budget.availableFunds.toLocaleString('ko-KR')}원 ·
@@ -335,7 +342,13 @@ function renderBudget(book, session, month, message = '') {
       <p>${escape(preview.fromMonth ?? '이전 달 없음')} 배정액에서 아직 입력하지 않은 ${preview.rows.length}항목,
       총 ${preview.total.toLocaleString('ko-KR')}원을 복사합니다. 이번 달에 입력한 금액은 0원도 그대로 유지합니다.</p>
       <button ${preview.rows.length ? '' : 'disabled'}>이전 달 예산 복사</button></form>
-    <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th></tr>${rows}</table>
+    <p>매월 배정 목표는 이번 달 배정액과 비교합니다. 이월 잔액과 지출은 목표 계산에 포함하지 않습니다. 목표를 0원으로 저장하면 해제합니다.</p>
+    <table><tr><th>카테고리</th><th>이번 달 배정</th><th>이번 달 지출</th><th>이월 포함 잔액</th><th>배정 변경</th><th>매월 목표</th></tr>${rows}</table>
+    <form method="post" action="/admin/budget/fill-targets">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
+      <input type="hidden" name="requestId" value="${randomUUID()}">
+      <p>목표 부족액 합계 ${targetPreview.total.toLocaleString('ko-KR')}원 · 채운 후 미배정 자금 ${(budget.readyToAssign - targetPreview.total).toLocaleString('ko-KR')}원</p>
+      <button ${targetPreview.total > 0 ? '' : 'disabled'}>이번 달 목표 부족액 채우기</button></form>
     <h2>카테고리 간 예산 이동</h2><p>이번 달 배정액 안에서 이동합니다. 총 배정액은 유지하며, 지출과 이월액은 이동하지 않습니다.</p>
     <form method="post" action="/admin/budget/move">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
@@ -818,6 +831,22 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         amountExpression: form.get('amountExpression') });
       sendHtml(res, 200, renderBudget(book, session, month,
         `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 예산 이동: ${result.payload.amount.toLocaleString('ko-KR')}원</p>`));
+      return true;
+    }
+    if (req.method === 'POST' && ['/admin/budget/target', '/admin/budget/fill-targets'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const month = form.get('month');
+      assertMonth(month);
+      let message;
+      if (pathname.endsWith('/target')) {
+        setBudgetTarget(book, session.sub, form.get('categoryId'), form.get('amountExpression'));
+        message = '매월 배정 목표를 저장했습니다.';
+      } else {
+        const result = fillBudgetTargets(book, session.sub, month, form.get('requestId'));
+        message = `${result.duplicate ? '이미 처리한' : '처리한'} 목표 배정: ${result.count}항목, ${result.total.toLocaleString('ko-KR')}원`;
+      }
+      sendHtml(res, 200, renderBudget(book, session, month, `<p class="notice">${escape(message)}</p>`));
       return true;
     }
     if (req.method === 'POST' && pathname === '/admin/budget') {
