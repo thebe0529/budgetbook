@@ -9,7 +9,7 @@ import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
-import { recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
+import { cardCashDefault, setCardCashDefault, recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
@@ -369,7 +369,7 @@ function renderCards(book, session, throughDate, message = '') {
     canAccessAccount(book, session.sub, a.id, 'write'));
   const expenses = accounts.filter(a => a.type === 'expense');
   const categories = [...book.budgetCategories().values()];
-  const options = values => values.map(a => `<option value="${escape(a.id)}">${escape(a.name)}</option>`).join('');
+  const options = (values, selected) => values.map(a => `<option value="${escape(a.id)}" ${a.id === selected ? 'selected' : ''}>${escape(a.name)}</option>`).join('');
   const purchase = cards.length && expenses.length ? `<h2>카드 구매·할부 등록</h2>
     <form method="post" action="/admin/cards/purchase">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}">
@@ -397,8 +397,13 @@ function renderCards(book, session, throughDate, message = '') {
       `<form method="post" action="/admin/cards/pay"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="planId" value="${escape(row.planId)}"><input type="hidden" name="index" value="${row.index}">
       <label>실제 결제일</label><input type="date" name="date" value="${escape(row.dueDate)}" required>
-      <label>출금 계좌</label><select name="cashId">${options(cash)}</select><button>결제 기록</button></form>` : ''}</td></tr>`).join('');
-  return page('카드 예정액', `${message}${purchase}<h2>미결제 할부 예정액</h2>
+      <label>출금 계좌</label><select name="cashId">${options(cash, cardCashDefault(book, session.sub, row.cardId))}</select><button>결제 기록</button></form>` : ''}</td></tr>`).join('');
+  const defaults = session.role !== 'owner' ? '' : `<h2>카드별 기본 출금 계좌</h2>${cards.map(card =>
+    `<form method="post" action="/admin/cards/default-cash"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    <input type="hidden" name="cardId" value="${escape(card.id)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
+    <label>${escape(card.name)} 출금 계좌</label><select name="cashId"><option value="">기본값 해제</option>
+    ${options(cash, cardCashDefault(book, session.sub, card.id))}</select><button>기본 계좌 저장</button></form>`).join('')}`;
+  return page('카드 예정액', `${message}${purchase}${defaults}<h2>미결제 할부 예정액</h2>
     <form method="get" action="/admin/cards"><label>조회 종료일</label>
     <input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
     <table><tr><th>월</th><th>결제 예정액</th></tr>${months}</table>
@@ -710,6 +715,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const throughDate = new URL(req.url, 'http://localhost').searchParams.get('throughDate') ||
         `${Number(today.slice(0, 4)) + 1}-${today.slice(5, 7)}-${today.slice(8, 10)}`;
       sendHtml(res, 200, renderCards(book, session, throughDate)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/cards/default-cash') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const throughDate = form.get('throughDate');
+      assertDate(throughDate);
+      setCardCashDefault(book, session.sub, form.get('cardId'), form.get('cashId') || null);
+      sendHtml(res, 200, renderCards(book, session, throughDate, '<p class="notice">카드 기본 출금 계좌를 저장했습니다.</p>'));
+      return true;
     }
     if (req.method === 'POST' && ['/admin/cards/purchase', '/admin/cards/pay'].includes(pathname)) {
       const form = await formBody(req);

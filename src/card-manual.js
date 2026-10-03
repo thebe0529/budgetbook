@@ -1,10 +1,35 @@
 import { createHash } from 'node:crypto';
 import { calculateAmount } from './amount-expression.js';
 import { assertDate } from './ledger.js';
-import { canAccessAccount } from './members.js';
+import { canAccessAccount, member } from './members.js';
 
 const validId = id => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id);
 const digest = data => createHash('sha256').update(JSON.stringify(data)).digest('hex');
+
+export function setCardCashDefault(book, sub, cardId, cashId) {
+  if (member(book, sub)?.role !== 'owner') throw new Error('Owner access required');
+  const accounts = book.accounts();
+  const card = accounts.get(cardId);
+  if (!card?.card || card.type !== 'liability') throw new Error('Select a card liability');
+  if (!cashId) {
+    book.db.prepare('DELETE FROM card_cash_defaults WHERE card_id = ?').run(cardId);
+    return;
+  }
+  const cash = accounts.get(cashId);
+  if (!cash?.cash || cash.type !== 'asset') throw new Error('Select a cash asset account');
+  book.db.prepare(`INSERT INTO card_cash_defaults (card_id, cash_id) VALUES (?, ?)
+    ON CONFLICT(card_id) DO UPDATE SET cash_id=excluded.cash_id`).run(cardId, cashId);
+}
+
+export function cardCashDefault(book, sub, cardId) {
+  const cashId = book.db.prepare('SELECT cash_id FROM card_cash_defaults WHERE card_id = ?').get(cardId)?.cash_id;
+  if (!cashId || !canAccessAccount(book, sub, cardId, 'write') ||
+    !canAccessAccount(book, sub, cashId, 'write')) return null;
+  const accounts = book.accounts();
+  const card = accounts.get(cardId);
+  const cash = accounts.get(cashId);
+  return card?.card && card.type === 'liability' && cash?.cash && cash.type === 'asset' ? cashId : null;
+}
 
 export function recordCardPurchase(book, userSub, input) {
   const { requestId, date, cardId, expenseId, firstDueDate, categoryId, memo = '' } = input;
