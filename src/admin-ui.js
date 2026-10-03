@@ -18,6 +18,7 @@ import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
+import { registerFilters, registerPage } from './register-view.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -78,7 +79,7 @@ function renderAccounts(book, session, message = '') {
     <tbody>${rows}</tbody></table>${controls}`);
 }
 
-function renderRegister(book, session, accountId, message = '', status = 'all') {
+function renderRegister(book, session, accountId, message = '', filters = registerFilters(new URLSearchParams())) {
   const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
   if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
   const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
@@ -103,10 +104,15 @@ function renderRegister(book, session, accountId, message = '', status = 'all') 
       <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${categories}</select>
       <label>메모</label><input name="memo"><button>거래 저장</button></form>
       <p><a href="/admin/split?accountId=${encodeURIComponent(selected.id)}">여러 행으로 분할 거래 입력</a></p>`;
-  if (!['all', 'unchecked', 'checked'].includes(status)) throw new Error('Invalid transaction filter');
+  const { status } = filters;
   const writable = canAccessAccount(book, session.sub, selected.id, 'write');
-  const filtered = register.rows.filter(row => status === 'all' || row.checked === (status === 'checked'));
-  const rows = filtered.slice(0, 200).map(row => {
+  const view = registerPage(register, filters);
+  const hiddenFilters = Object.entries({ ...filters, page: view.page }).map(([name, value]) =>
+    `<input type="hidden" name="${name}" value="${escape(value)}">`).join('');
+  const pageLink = number => `/admin/register?${escape(new URLSearchParams({ ...filters, accountId: selected.id, page: number }).toString())}`;
+  const navigation = `<nav aria-label="거래 페이지">${view.page > 1 ? `<a href="${pageLink(view.page - 1)}">이전</a>` : ''}
+    ${view.page} / ${view.pages} 페이지 ${view.page < view.pages ? `<a href="${pageLink(view.page + 1)}">다음</a>` : ''}</nav>`;
+  const rows = view.rows.map(row => {
     const editable = row.kind === 'manual-split' && row.sourceAccountId === selected.id &&
       canAccessAccount(book, session.sub, selected.id, 'write') &&
       (row.createdBy === session.sub || session.role === 'owner');
@@ -115,20 +121,24 @@ function renderRegister(book, session, accountId, message = '', status = 'all') 
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
     <td>${row.checked ? '확인 완료' : '미확인'}${canAccessAccount(book, session.sub, selected.id, 'write') ?
     `<form method="post" action="/admin/register/check"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    ${hiddenFilters}
     <input type="hidden" name="accountId" value="${escape(selected.id)}"><input type="hidden" name="entryId" value="${escape(row.id)}">
     <input type="hidden" name="expectedHash" value="${escape(row.confirmationHash)}">
     <input type="hidden" name="checked" value="${row.checked ? 'false' : 'true'}"><button>${row.checked ? '확인 해제' : '거래 확인'}</button></form>` : ''}</td></tr>`;
   }).join('');
   return page(`${selected.name} 거래`, `${message}<form method="get" action="/admin/register">
     <label>계좌</label><select name="accountId">${options}</select>
-    <label>확인 상태</label><select name="status">${[['all', '전체'], ['unchecked', '미확인'], ['checked', '확인 완료']].map(([value, label]) => `<option value="${value}"${status === value ? ' selected' : ''}>${label}</option>`).join('')}</select><button>조회</button></form>
+    <label>확인 상태</label><select name="status">${[['all', '전체'], ['unchecked', '미확인'], ['checked', '확인 완료']].map(([value, label]) => `<option value="${value}"${status === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
+    <label>시작일</label><input type="date" name="fromDate" value="${escape(filters.fromDate)}">
+    <label>종료일</label><input type="date" name="throughDate" value="${escape(filters.throughDate)}">
+    <label>메모 검색</label><input name="memo" maxlength="200" value="${escape(filters.memo)}"><button>조회</button></form>
     <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원 · 확인 거래 누적 합계: ${register.checkedBalance.toLocaleString('ko-KR')}원 · 미확인 ${register.uncheckedCount}건</p>
     <p>은행 내역과 대조한 거래를 확인 표시하세요. 거래가 수정되면 표시를 다시 확인해야 합니다. 확인 표시는 원장 잔액을 변경하지 않습니다.</p>${input}
-    <h2>최근 거래</h2><p>조건에 맞는 ${filtered.length}건 중 최근 최대 200건을 표시합니다.</p>
+    <h2>거래 목록</h2><p>조건에 맞는 ${view.total}건 · 검색 거래 증감 합계: ${view.movement.toLocaleString('ko-KR')}원 · 페이지당 최대 200건. 잔액은 검색 조건과 무관한 전체 원장 기준입니다.</p>${navigation}
     ${writable ? `<form id="confirm-selected" method="post" action="/admin/register/check-selected">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
-    <input type="hidden" name="status" value="${status}"><button>선택 거래 확인</button></form>` : ''}
-    <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>`);
+    ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
+    <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
 }
 
 function renderSplit(book, session, accountId, entryId = null, message = '') {
@@ -843,15 +853,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/register') {
       const query = new URL(req.url, 'http://localhost').searchParams;
-      sendHtml(res, 200, renderRegister(book, session, query.get('accountId'), '', query.get('status') || 'all')); return true;
+      sendHtml(res, 200, renderRegister(book, session, query.get('accountId'), '', registerFilters(query))); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/register/check-selected') {
       const form = await formBody(req);
       if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
-      const status = form.get('status') || 'all';
-      if (!['all', 'unchecked', 'checked'].includes(status)) throw new Error('Invalid transaction filter');
+      const filters = registerFilters(form);
       const count = confirmTransactions(book, session.sub, form.get('accountId'), form.getAll('selection').map(value => JSON.parse(value)));
-      sendHtml(res, 200, renderRegister(book, session, form.get('accountId'), `<p class="notice">${count}건의 거래를 확인했습니다.</p>`, status));
+      sendHtml(res, 200, renderRegister(book, session, form.get('accountId'), `<p class="notice">${count}건의 거래를 확인했습니다.</p>`, filters));
       return true;
     }
     if (req.method === 'POST' && pathname === '/admin/register/check') {
@@ -859,8 +868,9 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
       if (!['true', 'false'].includes(form.get('checked'))) throw new Error('Invalid confirmation status');
       const accountId = form.get('accountId');
+      const filters = registerFilters(form);
       setTransactionChecked(book, session.sub, accountId, form.get('entryId'), form.get('checked') === 'true', form.get('expectedHash'));
-      sendHtml(res, 200, renderRegister(book, session, accountId, '<p class="notice">거래 확인 상태를 저장했습니다.</p>'));
+      sendHtml(res, 200, renderRegister(book, session, accountId, '<p class="notice">거래 확인 상태를 저장했습니다.</p>', filters));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/reports') {
