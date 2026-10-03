@@ -5,6 +5,10 @@ import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { createLedgerAccount } from '../src/manual.js';
 import { createImportApi } from '../src/import-api.js';
+import { accountRegister } from '../src/manual.js';
+import { setTransactionChecked } from '../src/transaction-checks.js';
+import { compareStatement, saveStatementComparison, completeStatementReview } from '../src/statement-comparison.js';
+import { lockAccountPeriod } from '../src/account-locks.js';
 
 test('local sync exposes scoped accounts and queues submit idempotently with session and CSRF', async () => {
   const book = new Book();
@@ -57,13 +61,59 @@ test('PWA shell and worker are public but never return account data or cache API
     const shell = await fetch(`${url}/app/`);
     assert.equal(shell.status, 200);
     assert.match(await shell.text(), /BudgetBook 거래 입력/);
-    for (const asset of ['app.js', 'sw.js', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png']) {
+    for (const asset of ['app.js', 'local-policy.js', 'sw.js', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png']) {
       assert.equal((await fetch(`${url}/app/${asset}`)).status, 200);
     }
     const worker = await (await fetch(`${url}/app/sw.js`)).text();
     assert.match(worker, /FILES\.includes\(url\.pathname\)/);
     assert.doesNotMatch(worker, /api\/v1\/local/);
     assert.equal((await fetch(`${url}/api/v1/local/state`)).status, 401);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('local snapshot exposes scoped locks and locked writes return 423 while accepted retries remain safe', async () => {
+  const book = new Book();
+  ensureOwner(book, 'owner');
+  const bank = createLedgerAccount(book, 'owner', { name: '공유 은행', type: 'asset' });
+  const other = createLedgerAccount(book, 'owner', { name: '이체 은행', type: 'asset' });
+  const hidden = createLedgerAccount(book, 'owner', { name: '비공개 은행', type: 'asset' });
+  const expense = createLedgerAccount(book, 'owner', { name: '식비', type: 'expense' });
+  setMember(book, 'owner', 'editor', 'editor', [bank.id, other.id]);
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'editor', role: 'editor', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/api/v1/local`;
+  const send = data => fetch(`${base}/transactions`, { method: 'POST', headers: {
+    'Content-Type': 'application/json', 'X-CSRF-Token': 'token' }, body: JSON.stringify(data) });
+  try {
+    const split = { requestId: randomUUID(), date: '2026-10-01', kind: 'split', splitKind: 'expense',
+      accountId: bank.id, lines: [{ counterId: expense.id, amountExpression: '100' }, { counterId: expense.id, amountExpression: '200' }] };
+    assert.equal((await send(split)).status, 201);
+    const row = accountRegister(book, 'owner', bank.id, '2026-10-01').rows[0];
+    setTransactionChecked(book, 'owner', bank.id, row.id, true, row.confirmationHash);
+    const preview = compareStatement(book, 'owner', bank.id, '2026-10-01', '-300');
+    const saved = saveStatementComparison(book, 'owner', { accountId: bank.id, throughDate: '2026-10-01',
+      statementExpression: '-300', expectedHash: preview.stateHash, requestId: randomUUID() }).saved;
+    completeStatementReview(book, 'owner', saved.id);
+    lockAccountPeriod(book, 'owner', saved.id, randomUUID());
+    const state = await (await fetch(`${base}/state`)).json();
+    const locked = state.accounts.find(a => a.id === bank.id);
+    assert.equal(locked.lockedThroughDate, '2026-10-01');
+    assert.equal(locked.rows[0].locked, true);
+    assert.equal(locked.rows[0].split, undefined);
+    assert.equal(state.counterpartAccounts.find(a => a.id === bank.id).lockedThroughDate, '2026-10-01');
+    assert.ok(!state.accounts.some(a => a.id === hidden.id));
+    assert.ok(!state.counterpartAccounts.some(a => a.id === hidden.id));
+    assert.equal((await send(split)).status, 200);
+    const expenseInput = { requestId: randomUUID(), kind: 'expense', date: '2026-10-01',
+      accountId: bank.id, counterId: expense.id, amountExpression: '100' };
+    const blocked = await send(expenseInput);
+    assert.equal(blocked.status, 423);
+    assert.equal((await blocked.json()).code, 'PERIOD_LOCKED');
+    assert.equal((await send({ ...split, requestId: randomUUID(), kind: 'split-update', entryId: row.id,
+      expectedRevision: 1, date: '2026-10-02' })).status, 423);
+    assert.equal((await send({ ...expenseInput, requestId: randomUUID(), kind: 'transfer', accountId: other.id, counterId: bank.id })).status, 423);
+    assert.equal(book.entries().length, 1);
+    assert.equal((await send({ ...expenseInput, requestId: randomUUID(), date: '2026-10-02' })).status, 201);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
 

@@ -4,17 +4,23 @@ import { editableManual, recordSplitManual, updateSplitManual } from './split-ma
 
 export function localSnapshot(book, sub) {
   const accounts = visibleAccounts(book, sub);
+  const locks = new Map(book.db.prepare('SELECT account_id, through_date FROM account_period_locks').all()
+    .map(row => [row.account_id, row.through_date]));
+  const entries = new Map(book.entries().map(entry => [entry.id, entry]));
   const accountsForRegister = accounts.filter(a => ['asset', 'liability'].includes(a.type));
   return {
     subject: sub,
     accounts: accountsForRegister.map(a => {
       const register = accountRegister(book, sub, a.id, '9999-12-31');
+      const lockedThroughDate = locks.get(a.id) ?? null;
       return { id: a.id, name: a.name, type: a.type,
+        lockedThroughDate,
         onBudget: a.onBudget, canWrite: canAccessAccount(book, sub, a.id, 'write'),
         balance: register.balance, rows: register.rows.slice(0, 100).map(row => {
-          const entry = row.kind === 'manual-split' && row.sourceAccountId === a.id ?
+          const locked = entries.get(row.id).postings.some(p => locks.has(p.accountId) && row.date <= locks.get(p.accountId));
+          const entry = !locked && row.kind === 'manual-split' && row.sourceAccountId === a.id ?
             editableManual(book, sub, row.id) : null;
-          return { id: row.id, date: row.date, memo: row.memo, movement: row.movement,
+          return { id: row.id, date: row.date, memo: row.memo, movement: row.movement, locked,
             balance: row.balance, ...(entry ? { split: { revision: entry.revision,
               splitKind: entry.splitKind, lines: entry.postings.filter(p => p.accountId !== a.id)
                 .map((p, i) => ({ counterId: p.accountId, amount: p.amount,
@@ -23,7 +29,8 @@ export function localSnapshot(book, sub) {
     }),
     counterpartAccounts: [...book.accounts().values()].filter(a => ['expense', 'income'].includes(a.type) ||
       (['asset', 'liability'].includes(a.type) && canAccessAccount(book, sub, a.id, 'write')))
-      .map(a => ({ id: a.id, name: a.name, type: a.type })),
+      .map(a => ({ id: a.id, name: a.name, type: a.type,
+        lockedThroughDate: locks.get(a.id) ?? null })),
     categories: [...book.budgetCategories().values()].map(c => ({ id: c.id, name: c.name })),
   };
 }

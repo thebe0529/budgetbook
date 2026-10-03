@@ -30,6 +30,7 @@ export function createImportApi(book, { auth } = {}) {
       ['/app', ['../public/index.html', 'text/html; charset=utf-8']],
       ['/app/', ['../public/index.html', 'text/html; charset=utf-8']],
       ['/app/app.js', ['../public/app.js', 'text/javascript; charset=utf-8']],
+      ['/app/local-policy.js', ['../public/local-policy.js', 'text/javascript; charset=utf-8']],
       ['/app/sw.js', ['../public/sw.js', 'text/javascript; charset=utf-8']],
       ['/app/manifest.json', ['../public/manifest.json', 'application/manifest+json']],
       ['/app/icon.svg', ['../public/icon.svg', 'image/svg+xml']],
@@ -70,6 +71,8 @@ export function createImportApi(book, { auth } = {}) {
         const { entry, duplicate } = acceptLocalTransaction(book, session.sub, await readBody(req));
         return json(res, duplicate ? 200 : 201, { id: entry.id, duplicate });
       } catch (error) {
+        if (error.message === 'Account period is locked') return json(res, 423,
+          { code: 'PERIOD_LOCKED', error: '거래 날짜가 계좌의 잠금 기간에 포함됩니다. 실제 거래일을 확인하거나 소유자에게 잠금 해제를 요청하세요.' });
         return json(res, /reload before editing/.test(error.message) ? 409 : 400,
           { error: error.message });
       }

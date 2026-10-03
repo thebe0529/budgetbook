@@ -1,5 +1,5 @@
-const CACHE = 'budgetbook-shell-v3';
-const FILES = ['/app/', '/app/app.js', '/app/manifest.json', '/app/icon.svg',
+const CACHE = 'budgetbook-shell-v4';
+const FILES = ['/app/', '/app/app.js', '/app/local-policy.js', '/app/manifest.json', '/app/icon.svg',
   '/app/icon-192.png', '/app/icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting()));

@@ -1,3 +1,5 @@
+import { periodLockMessage, correctRejectedDate } from './local-policy.js';
+
 const notice = document.querySelector('#notice');
 const form = document.querySelector('#transaction-form');
 const workspace = document.querySelector('#workspace');
@@ -9,6 +11,7 @@ let state;
 let key;
 let server;
 let syncing = false;
+let queueEditing = false;
 let writeTail = Promise.resolve();
 
 function status(message) { notice.textContent = message; }
@@ -183,7 +186,7 @@ function render() {
   const accounts = document.querySelector('#accounts');
   accounts.replaceChildren(...snapshot.accounts.map(a => {
     const item = document.createElement('li');
-    item.textContent = `${a.name}: ${Number(a.balance).toLocaleString('ko-KR')}원`;
+    item.textContent = `${a.name}: ${Number(a.balance).toLocaleString('ko-KR')}원${a.lockedThroughDate ? ` · ${a.lockedThroughDate}까지 기간 잠금` : ''}`;
     return item;
   }));
   const history = document.querySelector('#history');
@@ -191,7 +194,8 @@ function render() {
     const li = document.createElement('li');
     li.textContent = `${row.date} ${row.memo || row.id} · ${Number(row.movement).toLocaleString('ko-KR')}원
       (잔액 ${Number(row.balance).toLocaleString('ko-KR')}원) `;
-    if (row.split) {
+    if (row.locked) li.append(document.createTextNode('기간 잠금 · 수정 불가'));
+    if (row.split && !row.locked) {
       const edit = document.createElement('button');
       edit.type = 'button';
       edit.textContent = '분할 수정';
@@ -207,24 +211,58 @@ function render() {
       `${item.date} ${item.memo || item.splitKind} · ${item.kind === 'split-update' ? '수정' : '분할'}
       ${item.lines.length}행 (${item.lines.map(l => l.amountExpression).join(' + ')}) ` :
       `${item.date} ${item.memo || item.kind} · ${item.amountExpression}원 `;
+    const warning = periodLockMessage(snapshot, item);
+    if (warning || item.syncError) {
+      const error = document.createElement('p');
+      error.textContent = item.syncError?.message || warning;
+      li.append(error);
+    }
+    if (item.syncError?.code === 'PERIOD_LOCKED' && item.kind !== 'split-update') {
+      const label = document.createElement('label');
+      label.textContent = '실제 거래일 확인 후 수정';
+      const date = document.createElement('input');
+      date.type = 'date'; date.value = item.date; date.required = true; date.disabled = syncing || queueEditing;
+      label.append(date);
+      const correct = document.createElement('button');
+      correct.type = 'button'; correct.textContent = '대기 거래 일자 수정'; correct.disabled = syncing || queueEditing;
+      correct.addEventListener('click', async () => {
+        if (syncing || queueEditing || !date.reportValidity()) return;
+        const previous = state.pending;
+        queueEditing = true;
+        render();
+        try {
+          const replacement = correctRejectedDate(state.snapshot, item, date.value, crypto.randomUUID());
+          state.pending = previous.map(p => p.requestId === item.requestId ? replacement : p);
+          await save(); render();
+          status('거절된 대기 거래의 일자를 수정했습니다. 실제 거래일을 확인한 뒤 동기화하세요.');
+        } catch (error) { state.pending = previous; status(error.message); }
+        finally { queueEditing = false; render(); }
+      });
+      li.append(label, correct);
+    }
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.textContent = '대기 거래 삭제';
-    remove.disabled = syncing;
+    remove.disabled = syncing || queueEditing;
     remove.addEventListener('click', async () => {
-      if (syncing) return;
+      if (syncing || queueEditing) return;
       state.pending = state.pending.filter(p => p.requestId !== item.requestId);
       await save(); render();
     });
     li.append(remove);
     return li;
   }));
-  document.querySelector('#sync-button').disabled = syncing || !state.pending.length;
-  document.querySelector('#lock-button').disabled = syncing;
+  document.querySelector('#sync-button').disabled = syncing || queueEditing || !state.pending.length;
+  document.querySelector('#lock-button').disabled = syncing || queueEditing;
+  document.querySelector('#period-warning').textContent = periodLockMessage(snapshot, {
+    kind: form.dataset.editId ? 'split-update' : split ? 'split' : kind,
+    accountId: form.dataset.editAccountId || accountSelect.value, entryId: form.dataset.editId,
+    date: form.elements.date.value, counterId: split ? null : form.elements.counterId.value,
+    lines: split ? [...rows.children].map(row => ({ counterId: row.querySelector('[name="splitCounterId"]').value })) : [] });
 }
 
 async function sync() {
-  if (syncing || !state) return;
+  if (syncing || queueEditing || !state) return;
   syncing = true;
   render();
   try {
@@ -235,11 +273,21 @@ async function sync() {
       categories: server.categories };
     await save();
     while (state.pending.length) {
+      // A retry may commit before its response is lost. Clear the old definitive
+      // rejection before sending so date correction cannot duplicate that commit.
+      if (state.pending[0].syncError) {
+        delete state.pending[0].syncError;
+        await save();
+      }
       const response = await fetch('/api/v1/local/transactions', { method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': server.csrf },
         body: JSON.stringify(state.pending[0]) });
       if (!response.ok) {
         const result = await response.json();
+        if (result.code === 'PERIOD_LOCKED') {
+          state.pending[0].syncError = { code: result.code, message: result.error };
+          await save();
+        }
         throw new Error(response.status === 401 ? 'Pocket ID 로그인이 필요합니다.' :
           `전송 대기 거래 오류 (${response.status}): ${result.error || '확인 필요'}${response.status === 409 ?
             ' · 최신 거래를 확인하고 대기 요청을 삭제한 뒤 다시 수정하세요.' : ''}`);
@@ -291,7 +339,7 @@ document.querySelector('#unlock-form').addEventListener('submit', async event =>
 });
 
 form.addEventListener('change', event => {
-  if (['mode', 'kind', 'accountId'].includes(event.target.name)) render();
+  if (['mode', 'kind', 'accountId', 'date', 'counterId', 'splitCounterId'].includes(event.target.name)) render();
 });
 document.querySelector('#add-split-row').addEventListener('click', () => {
   const rows = document.querySelector('#split-rows');
@@ -305,6 +353,7 @@ document.querySelector('#cancel-edit').addEventListener('click', () => {
 });
 form.addEventListener('submit', async event => {
   event.preventDefault();
+  if (queueEditing) { status('대기 거래 일자 저장을 마친 뒤 입력하세요.'); return; }
   if (!state || Date.now() - state.verifiedAt > 30 * DAY) {
     status('오프라인 이용 기간이 지났습니다. 먼저 서버에서 로그인하고 동기화하세요.'); return;
   }
@@ -331,6 +380,8 @@ form.addEventListener('submit', async event => {
     input = { ...input, kind: data.kind, counterId: data.counterId,
       amountExpression: data.amountExpression, categoryId: data.categoryId || null };
   }
+  const warning = periodLockMessage(state.snapshot, input);
+  if (warning) { status(warning); return; }
   state.pending.push(input);
   try { await save(); }
   catch (error) { state.pending.pop(); status(`로컬 저장 실패: ${error.message}`); return; }
@@ -342,7 +393,7 @@ form.addEventListener('submit', async event => {
 
 document.querySelector('#sync-button').addEventListener('click', sync);
 document.querySelector('#lock-button').addEventListener('click', () => {
-  if (syncing) return;
+  if (syncing || queueEditing) return;
   state = null; key = null; server = null; workspace.hidden = true;
   document.querySelector('#unlock-section').hidden = false;
   status('로컬 자료가 잠겼습니다.');

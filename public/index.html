@@ -32,6 +32,7 @@ button:disabled{opacity:.5}ul{padding-left:1.3rem}li{margin:.5rem 0}
 <label>유형<select name="kind"><option value="expense">지출</option><option value="income">수입</option>
 <option value="transfer">이체</option></select></label>
 <label>계좌<select name="accountId" required></select></label>
+<p id="period-warning" role="status"></p>
 <div id="single-fields">
 <label>상대 계정<select name="counterId" required></select></label>
 <label>금액 (사칙연산 가능)<input name="amountExpression" inputmode="decimal" required></label>
@@ -43,7 +44,7 @@ button:disabled{opacity:.5}ul{padding-left:1.3rem}li{margin:.5rem 0}
 <button id="add-split-row" type="button">행 추가</button></div>
 <label>메모<input name="memo" maxlength="500"></label>
 <button>로컬에 저장</button><button id="cancel-edit" type="button" hidden>수정 취소</button></form></section>
-<section><h2>전송 대기 거래</h2><p>대기 거래는 잔액에 반영되지 않습니다. 서버에 전송된 뒤 잔액을 다시 가져옵니다.</p>
+<section><h2>전송 대기 거래</h2><p>대기 거래는 잔액에 반영되지 않습니다. 기간 잠금 상태는 마지막 동기화 기준이며 서버가 전송 시 다시 검사합니다. 잠금으로 거절된 신규 거래는 실제 거래일을 확인해 대기열에서 일자를 수정할 수 있습니다.</p>
 <ul id="queue"></ul><button id="sync-button" type="button">지금 동기화</button>
 <button id="lock-button" type="button">잠금</button></section></main>
 <script type="module" src="/app/app.js"></script></body></html>
