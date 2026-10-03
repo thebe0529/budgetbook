@@ -20,6 +20,7 @@ import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budge
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage } from './register-view.js';
 import { compareStatement, completeStatementReview, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
+import { accountPeriodLock, accountLockHistory, lockAccountPeriod, unlockAccountPeriod } from './account-locks.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -86,6 +87,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
   const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
   if (!selected) return page('거래 입력', '<p>볼 수 있는 계좌가 없습니다.</p>');
   const register = accountRegister(book, session.sub, selected.id, '9999-12-31');
+  const periodLock = accountPeriodLock(book, session.sub, selected.id);
   const options = accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('');
   const counters = [...book.accounts().values()].filter(a => ['income', 'expense', 'equity'].includes(a.type) ||
     (['asset', 'liability'].includes(a.type) && canAccessAccount(book, session.sub, a.id, 'write')))
@@ -114,13 +116,14 @@ function renderRegister(book, session, accountId, message = '', filters = regist
   const navigation = `<nav aria-label="거래 페이지">${view.page > 1 ? `<a href="${pageLink(view.page - 1)}">이전</a>` : ''}
     ${view.page} / ${view.pages} 페이지 ${view.page < view.pages ? `<a href="${pageLink(view.page + 1)}">다음</a>` : ''}</nav>`;
   const rows = view.rows.map(row => {
-    const editable = row.kind === 'manual-split' && row.sourceAccountId === selected.id &&
+    const locked = periodLock && row.date <= periodLock.throughDate;
+    const editable = !locked && row.kind === 'manual-split' && row.sourceAccountId === selected.id &&
       canAccessAccount(book, session.sub, selected.id, 'write') &&
       (row.createdBy === session.sub || session.role === 'owner');
     return `<tr><td>${writable && !row.checked ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 확인 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}</td>
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
-    <td>${row.checked ? '확인 완료' : '미확인'}${canAccessAccount(book, session.sub, selected.id, 'write') ?
+    <td>${row.checked ? '확인 완료' : '미확인'}${locked ? ' · 기간 잠금' : ''}${!locked && canAccessAccount(book, session.sub, selected.id, 'write') ?
     `<form method="post" action="/admin/register/check"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
     ${hiddenFilters}
     <input type="hidden" name="accountId" value="${escape(selected.id)}"><input type="hidden" name="entryId" value="${escape(row.id)}">
@@ -135,6 +138,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <label>메모 검색</label><input name="memo" maxlength="200" value="${escape(filters.memo)}"><button>조회</button></form>
     <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원 · 확인 거래 누적 합계: ${register.checkedBalance.toLocaleString('ko-KR')}원 · 미확인 ${register.uncheckedCount}건</p>
     <p><a href="/admin/balance-check?accountId=${encodeURIComponent(selected.id)}">이 계좌의 명세서 잔액 비교</a></p>
+    ${periodLock ? `<p class="notice">${escape(periodLock.throughDate)}까지 거래 기간이 잠겨 있습니다.</p>` : ''}
     <p>은행 내역과 대조한 거래를 확인 표시하세요. 거래가 수정되면 표시를 다시 확인해야 합니다. 확인 표시는 원장 잔액을 변경하지 않습니다.</p>${input}
     <h2>거래 목록</h2><p>조건에 맞는 ${view.total}건 · 검색 거래 증감 합계: ${view.movement.toLocaleString('ko-KR')}원 · 페이지당 최대 200건. 잔액은 검색 조건과 무관한 전체 원장 기준입니다.</p>${navigation}
     ${writable ? `<form id="confirm-selected" method="post" action="/admin/register/check-selected">
@@ -149,6 +153,14 @@ function renderBalanceCheck(book, session, query, message = '') {
   if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
   const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
   if (!selected) return page('명세서 잔액 비교', '<p>볼 수 있는 계좌가 없습니다.</p>');
+  const periodLock = accountPeriodLock(book, session.sub, selected.id);
+  const owner = member(book, session.sub)?.role === 'owner';
+  const lockControls = periodLock ? `<p class="notice">${escape(periodLock.throughDate)}까지 거래 추가·수정·삭제와 확인 해제가 잠겨 있습니다.
+    ${escape(periodLock.actor)} · ${escape(periodLock.createdAt)} (UTC)</p>${owner ?
+    `<form method="post" action="/admin/balance-check/unlock"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    <input type="hidden" name="accountId" value="${escape(selected.id)}"><input type="hidden" name="expectedLockId" value="${escape(periodLock.id)}">
+    <input type="hidden" name="requestId" value="${randomUUID()}"><label>기간 잠금 해제 사유</label><input name="reason" maxlength="500" required>
+    <button>기간 잠금 해제</button></form>` : ''}` : '<p>현재 기간 잠금이 없습니다.</p>';
   const throughDate = query.get('throughDate') || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   assertDate(throughDate);
   const expression = query.get('statementBalance') || '';
@@ -180,11 +192,18 @@ function renderBalanceCheck(book, session, query, message = '') {
       !saved.changed && saved.difference === 0 && saved.uncheckedCount === 0 && canAccessAccount(book, session.sub, selected.id, 'write') ?
       `<form method="post" action="/admin/balance-check/complete"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="comparisonId" value="${escape(saved.id)}"><button>검토 완료 표시</button></form>` : '';
+    const locking = owner && saved.review && !saved.changed && (!periodLock || saved.throughDate > periodLock.throughDate) ?
+      `<form method="post" action="/admin/balance-check/lock"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="comparisonId" value="${escape(saved.id)}"><input type="hidden" name="requestId" value="${randomUUID()}">
+      <button>${escape(saved.throughDate)}까지 기간 잠금</button></form>` : '';
     return `<tr><td>${escape(saved.throughDate)}</td><td>${saved.statementBalance.toLocaleString('ko-KR')}</td>
       <td>${saved.ledgerBalance.toLocaleString('ko-KR')}</td><td>${saved.difference.toLocaleString('ko-KR')}</td>
       <td>${saved.uncheckedCount}</td><td>${escape(saved.actor)}<br>${escape(saved.savedAt)}</td>
-      <td>${saved.changed ? '저장 후 변경됨' : '저장 당시와 동일'}${completion}<br><a href="${link}">현재 상태로 다시 비교</a></td></tr>`;
+      <td>${saved.changed ? '저장 후 변경됨' : '저장 당시와 동일'}${completion}${locking}<br><a href="${link}">현재 상태로 다시 비교</a></td></tr>`;
   }).join('');
+  const lockHistory = accountLockHistory(book, session.sub, selected.id).map(event => `<tr>
+    <td>${event.action === 'lock' ? '잠금' : '해제'}</td><td>${escape(event.lock.throughDate)}</td><td>${escape(event.actor)}</td>
+    <td>${escape(event.createdAt)}</td><td>${escape(event.reason || '')}</td></tr>`).join('');
   return page('명세서 잔액 비교', `${message}<form method="get" action="/admin/balance-check">
     <label>계좌</label><select name="accountId">${accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
     <label>기준일 (당일 거래 포함)</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
@@ -192,8 +211,10 @@ function renderBalanceCheck(book, session, query, message = '') {
     <button>잔액 비교</button></form>
     <p>예금은 보유 잔액을, 카드·대출은 남은 채무를 양수로 입력하세요. 초과 입금 등 반대 잔액은 음수로 입력할 수 있습니다.</p>
     <p>기준일까지의 기초 잔액을 포함한 모든 거래로 비교합니다. 결과 저장은 비교 이력을 남기며 거래 확인 표시나 원장 금액을 변경하지 않습니다.</p>
-    <p>잔액 차이가 0원이고 미확인 거래가 없는 이력은 검토 완료로 표시할 수 있습니다. 완료 후 거래나 확인 상태가 바뀌면 다시 검토해야 합니다. 완료 표시는 기간을 잠그지 않습니다.</p>${result}
-    <h2>저장한 비교 이력 (최근 20건)</h2><table><tr><th>기준일</th><th>명세서 잔액</th><th>원장 잔액</th><th>차이</th><th>미확인 건수</th><th>저장자·시각 (UTC)</th><th>상태</th></tr>${history || '<tr><td colspan="7">저장한 이력이 없습니다.</td></tr>'}</table>`);
+    <p>잔액 차이가 0원이고 미확인 거래가 없는 이력은 검토 완료로 표시할 수 있습니다. 완료 후 거래나 확인 상태가 바뀌면 다시 검토해야 합니다. 소유자는 검토 완료 이력을 기준으로 기간을 별도로 잠글 수 있습니다.</p>${result}
+    <h2>현재 기간 잠금</h2>${lockControls}
+    <h2>저장한 비교 이력 (최근 20건)</h2><table><tr><th>기준일</th><th>명세서 잔액</th><th>원장 잔액</th><th>차이</th><th>미확인 건수</th><th>저장자·시각 (UTC)</th><th>상태</th></tr>${history || '<tr><td colspan="7">저장한 이력이 없습니다.</td></tr>'}</table>
+    <h2>기간 잠금·해제 이력 (최근 20건)</h2><table><tr><th>작업</th><th>기준일</th><th>작업자</th><th>시각 (UTC)</th><th>해제 사유</th></tr>${lockHistory || '<tr><td colspan="5">잠금 이력이 없습니다.</td></tr>'}</table>`);
 }
 
 function renderSplit(book, session, accountId, entryId = null, message = '') {
@@ -905,6 +926,16 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/accounts') {
       sendHtml(res, 200, renderAccounts(book, session)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/balance-check/lock', '/admin/balance-check/unlock'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const { lock } = pathname.endsWith('/unlock') ? unlockAccountPeriod(book, session.sub, {
+        accountId: form.get('accountId'), expectedLockId: form.get('expectedLockId'), reason: form.get('reason'), requestId: form.get('requestId') }) :
+        lockAccountPeriod(book, session.sub, form.get('comparisonId'), form.get('requestId'));
+      sendHtml(res, 200, renderBalanceCheck(book, session, new URLSearchParams({ accountId: lock.accountId }),
+        `<p class="notice">기간 잠금 ${pathname.endsWith('/unlock') ? '해제' : '설정'}를 저장했습니다.</p>`));
+      return true;
     }
     if (req.method === 'POST' && pathname === '/admin/balance-check/complete') {
       const form = await formBody(req);

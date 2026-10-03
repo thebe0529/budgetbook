@@ -28,6 +28,12 @@ function writeCheck(book, sub, accountId, entryId, checked, expectedHash) {
   const row = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entryId);
   const entry = row && JSON.parse(row.data);
   if (!entry || !entry.postings.some(p => p.accountId === accountId)) throw new Error('Account transaction not found');
+  const lock = book.db.prepare('SELECT through_date FROM account_period_locks WHERE account_id = ?').get(accountId);
+  if (lock && entry.date <= lock.through_date) {
+    const existing = book.db.prepare('SELECT entry_hash FROM account_entry_checks WHERE account_id = ? AND entry_id = ?').get(accountId, entryId);
+    if (checked && expectedHash === entryFingerprint(entry) && existing?.entry_hash === expectedHash) return;
+    throw new Error('Account period is locked');
+  }
   if (checked && expectedHash !== entryFingerprint(entry)) throw new Error('Transaction changed; reload before confirming');
   if (!checked) {
     book.db.prepare('DELETE FROM account_entry_checks WHERE account_id = ? AND entry_id = ?').run(accountId, entryId);

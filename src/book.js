@@ -23,6 +23,40 @@ export class Book {
       CREATE INDEX IF NOT EXISTS statement_comparisons_account ON statement_comparisons(account_id, saved_at);
       CREATE TABLE IF NOT EXISTS statement_reviews (comparison_id TEXT PRIMARY KEY, actor TEXT NOT NULL,
         completed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS account_period_locks (account_id TEXT PRIMARY KEY, through_date TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS account_lock_events (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS locked_entry_insert BEFORE INSERT ON entries
+        WHEN EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN json_each(NEW.data, '$.postings') AS p
+          ON json_extract(p.value, '$.accountId') = locks.account_id
+          WHERE NEW.date <= locks.through_date OR json_extract(NEW.data, '$.date') <= locks.through_date)
+        BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
+      CREATE TRIGGER IF NOT EXISTS locked_entry_update BEFORE UPDATE ON entries
+        WHEN EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN json_each(OLD.data, '$.postings') AS p
+          ON json_extract(p.value, '$.accountId') = locks.account_id
+          WHERE OLD.date <= locks.through_date OR json_extract(OLD.data, '$.date') <= locks.through_date)
+        OR EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN json_each(NEW.data, '$.postings') AS p
+          ON json_extract(p.value, '$.accountId') = locks.account_id
+          WHERE NEW.date <= locks.through_date OR json_extract(NEW.data, '$.date') <= locks.through_date)
+        BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
+      CREATE TRIGGER IF NOT EXISTS locked_entry_delete BEFORE DELETE ON entries
+        WHEN EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN json_each(OLD.data, '$.postings') AS p
+          ON json_extract(p.value, '$.accountId') = locks.account_id
+          WHERE OLD.date <= locks.through_date OR json_extract(OLD.data, '$.date') <= locks.through_date)
+        BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
+      CREATE TRIGGER IF NOT EXISTS locked_check_insert BEFORE INSERT ON account_entry_checks
+        WHEN EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN entries ON entries.id = NEW.entry_id
+          WHERE locks.account_id = NEW.account_id AND entries.date <= locks.through_date)
+        BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
+      CREATE TRIGGER IF NOT EXISTS locked_check_update BEFORE UPDATE ON account_entry_checks
+        WHEN EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN entries ON entries.id = OLD.entry_id
+          WHERE locks.account_id = OLD.account_id AND entries.date <= locks.through_date)
+        OR EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN entries ON entries.id = NEW.entry_id
+          WHERE locks.account_id = NEW.account_id AND entries.date <= locks.through_date)
+        BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
+      CREATE TRIGGER IF NOT EXISTS locked_check_delete BEFORE DELETE ON account_entry_checks
+        WHEN EXISTS (SELECT 1 FROM account_period_locks AS locks JOIN entries ON entries.id = OLD.entry_id
+          WHERE locks.account_id = OLD.account_id AND entries.date <= locks.through_date)
+        BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_cash_defaults (card_id TEXT PRIMARY KEY, cash_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_payment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);
