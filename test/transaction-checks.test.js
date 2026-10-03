@@ -5,7 +5,7 @@ import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { accountRegister, createLedgerAccount, recordManual } from '../src/manual.js';
 import { recordSplitManual, updateSplitManual } from '../src/split-manual.js';
-import { entryFingerprint, setTransactionChecked } from '../src/transaction-checks.js';
+import { confirmTransactions, entryFingerprint, setTransactionChecked } from '../src/transaction-checks.js';
 import { createImportApi } from '../src/import-api.js';
 
 function setup() {
@@ -77,5 +77,37 @@ test('confirmation HTTP endpoint enforces CSRF, permissions and renders status',
     const response = await fetch(url, { method: 'POST', body: new URLSearchParams(body) });
     assert.equal(response.status, 200);
     assert.match(await response.text(), /확인 완료/);
+    const filtered = await fetch(`${url.replace('/check', '')}?accountId=${bank.id}&status=unchecked`);
+    assert.match(await filtered.text(), /조건에 맞는 0건/);
+    setTransactionChecked(book, 'editor', bank.id, entry.id, false);
+    const batch = new URLSearchParams({ csrf: 'token', accountId: bank.id, status: 'unchecked',
+      selection: JSON.stringify({ entryId: entry.id, expectedHash: entryFingerprint(entry) }) });
+    const bulkUrl = `${url}-selected`;
+    assert.equal((await fetch(bulkUrl, { method: 'POST', body: new URLSearchParams({ ...Object.fromEntries(batch), csrf: 'bad' }) })).status, 403);
+    assert.equal((await fetch(bulkUrl, { method: 'POST', headers: { Cookie: 'viewer=1' }, body: batch })).status, 400);
+    const bulk = await fetch(bulkUrl, { method: 'POST', body: batch });
+    assert.equal(bulk.status, 200);
+    assert.match(await bulk.text(), /1건의 거래를 확인했습니다/);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('bulk confirmation validates selections and rolls back every check on stale entry', () => {
+  const { book, bank, expense } = setup();
+  try {
+    const entries = ['1000', '2000'].map(amountExpression => recordManual(book, 'owner', {
+      requestId: randomUUID(), date: '2026-10-01', kind: 'expense', accountId: bank.id,
+      counterId: expense.id, amountExpression }).entry);
+    const selections = entries.map(entry => ({ entryId: entry.id, expectedHash: entryFingerprint(entry) }));
+    assert.throws(() => confirmTransactions(book, 'viewer', bank.id, selections), /write access/);
+    for (const invalid of [[], [selections[0], selections[0]], [null], Array(201).fill(selections[0])]) {
+      assert.throws(() => confirmTransactions(book, 'editor', bank.id, invalid), /distinct transactions/);
+    }
+    assert.throws(() => confirmTransactions(book, 'editor', bank.id,
+      [selections[0], { ...selections[1], expectedHash: 'stale' }]), /changed/);
+    assert.equal(book.db.prepare('SELECT COUNT(*) AS count FROM account_entry_checks').get().count, 0);
+    assert.equal(confirmTransactions(book, 'editor', bank.id, selections), 2);
+    assert.equal(confirmTransactions(book, 'editor', bank.id, selections), 2);
+    assert.equal(accountRegister(book, 'editor', bank.id, '2026-10-31').checkedBalance, -3000);
+    assert.equal(book.entries().length, 2);
+  } finally { book.close(); }
 });
