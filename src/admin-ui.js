@@ -130,6 +130,7 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
     <td><button type="button" data-remove-row>삭제</button></td></tr>`).join('');
   return page(entryId ? '분할 거래 수정' : '분할 거래 입력', `${message}
     <p>원천 계좌: ${escape(account.name)} · 상대 계정을 행으로 추가합니다. 각 행의 합계를 원천 계좌에 한 번 반영합니다.</p>
+    <p id="split-keyboard-help">Tab: 다음 입력칸 · Enter: 아래 행의 같은 입력칸 (마지막 행은 추가) · Shift+Enter: 위 행 · Ctrl+Enter 또는 ⌘+Enter: 저장. 최대 50행입니다.</p>
     <form id="split-form" method="post" action="${entryId ? '/admin/split/update' : '/admin/split'}">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="accountId" value="${escape(accountId)}">
@@ -141,7 +142,7 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
       <option value="income" ${kind === 'income' ? 'selected' : ''}>수입</option>
       <option value="transfer" ${kind === 'transfer' ? 'selected' : ''}>이체·카드 결제</option></select>
       <label>메모</label><input name="memo" value="${escape(existing?.memo ?? '')}">
-      <table><tr><th>상대 계정</th><th>금액</th><th>예산 카테고리</th><th></th></tr>
+      <table aria-describedby="split-keyboard-help"><tr><th>상대 계정</th><th>금액</th><th>예산 카테고리</th><th></th></tr>
       <tbody id="split-rows">${rows}</tbody></table><button type="button" id="add-split-row">행 추가</button>
       <button>분할 거래 ${entryId ? '수정' : '저장'}</button>
     </form><template id="counter-template"><select name="counterId">${options()}</select></template>

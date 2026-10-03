@@ -27,6 +27,7 @@ function addRow() {
   row.append(accountCell, amountCell, categoryCell, actionCell);
   rows.append(row);
   filterOptions();
+  return row;
 }
 
 function filterOptions() {
@@ -50,4 +51,24 @@ for (const button of rows?.querySelectorAll('[data-remove-row]') ?? []) {
   button.addEventListener('click', () => { if (rows.children.length > 2) button.closest('tr').remove(); });
 }
 kind?.addEventListener('change', filterOptions);
+form?.addEventListener('keydown', event => {
+  if (event.isComposing || event.key !== 'Enter') return;
+  if (event.ctrlKey || event.metaKey) {
+    event.preventDefault();
+    form.requestSubmit();
+    return;
+  }
+  const field = event.target;
+  if (!field.matches('#split-rows input, #split-rows select')) return;
+  event.preventDefault();
+  const row = field.closest('tr');
+  let nextRow = event.shiftKey ? row.previousElementSibling : row.nextElementSibling;
+  if (!nextRow && !event.shiftKey) nextRow = addRow();
+  if (!nextRow) return;
+  const next = nextRow.querySelector(`[name="${field.name}"]`);
+  if (next && !next.disabled) {
+    next.focus();
+    if (next instanceof HTMLInputElement) next.select();
+  }
+});
 filterOptions();
