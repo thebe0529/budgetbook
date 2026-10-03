@@ -85,3 +85,17 @@ export function recordCardPayment(book, userSub, input) {
   if (!Number.isSafeInteger(index) || index < 1) throw new Error('Invalid installment index');
   return book.payInstallment({ planId, index, date, cashId });
 }
+
+export function recordCardPaymentBatch(book, userSub, { requestId, items, date, cashId }) {
+  if (!validId(requestId)) throw new Error('Valid request ID required');
+  if (!Array.isArray(items) || items.length < 2 || items.length > 100) throw new Error('Select two to one hundred installments');
+  if (!canAccessAccount(book, userSub, cashId, 'write')) throw new Error('Cash account write access required');
+  const normalized = items.map(item => {
+    const plan = book.cardPlan(item?.planId);
+    if (!plan || !canAccessAccount(book, userSub, plan.cardId, 'write')) throw new Error('Card write access required');
+    if (!Number.isSafeInteger(item.index) || item.index < 1) throw new Error('Invalid installment index');
+    return { planId: item.planId, index: item.index };
+  }).sort((a, b) => a.planId.localeCompare(b.planId) || a.index - b.index);
+  return book.payInstallments({ items: normalized, date, cashId, requestId, actor: userSub,
+    payloadHash: digest({ items: normalized, date, cashId }) });
+}

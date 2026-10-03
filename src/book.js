@@ -18,6 +18,7 @@ export class Book {
       CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_cash_defaults (card_id TEXT PRIMARY KEY, cash_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS card_payment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cash_schedules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cash_schedule_links (
         schedule_id TEXT NOT NULL, occurrence_date TEXT NOT NULL, entry_id TEXT NOT NULL UNIQUE,
@@ -208,20 +209,44 @@ export class Book {
   }
 
   payInstallment({ planId, index, date, cashId }) {
+    return this.payInstallments({ items: [{ planId, index }], date, cashId }).entries[0];
+  }
+
+  payInstallments({ items, date, cashId, requestId, actor, payloadHash }) {
     assertDate(date);
     const accounts = this.accounts();
-    if (!accounts.get(cashId)?.cash) throw new Error('Payment requires a cash account');
+    if (!accounts.get(cashId)?.cash || accounts.get(cashId).type !== 'asset') throw new Error('Payment requires a cash account');
+    if (!Array.isArray(items) || items.length < 1 || items.length > 100 ||
+      new Set(items.map(item => JSON.stringify([item.planId, item.index]))).size !== items.length) {
+      throw new Error('Select one to one hundred distinct installments');
+    }
     return this.atomic(() => {
-      const plan = this.cardPlan(planId);
-      const installment = plan?.installments.find(item => item.index === index);
-      if (!installment || installment.paidEntryId) throw new Error('Unknown or already paid installment');
-      const entry = { id: `payment:${planId}:${index}`, date, kind: 'card-payment',
-        postings: [{ accountId: plan.cardId, side: 'debit', amount: installment.amount },
-          { accountId: cashId, side: 'credit', amount: installment.amount }] };
-      this.record(entry);
-      installment.paidEntryId = entry.id;
-      this.db.prepare('UPDATE card_plans SET data = ? WHERE id = ?').run(JSON.stringify(plan), planId);
-      return entry;
+      if (requestId) {
+        const old = this.db.prepare('SELECT data FROM card_payment_batches WHERE id = ?').get(requestId);
+        if (old) {
+          const previous = JSON.parse(old.data);
+          if (previous.actor !== actor || previous.payloadHash !== payloadHash) throw new Error('Request ID reused with different card payment');
+          return { ...previous, duplicate: true };
+        }
+      }
+      const entries = items.map(({ planId, index }) => {
+        const plan = this.cardPlan(planId);
+        const installment = plan?.installments.find(item => item.index === index);
+        if (!installment || installment.paidEntryId) throw new Error('Unknown or already paid installment');
+        const entry = { id: `payment:${planId}:${index}`, date, kind: 'card-payment',
+          postings: [{ accountId: plan.cardId, side: 'debit', amount: installment.amount },
+            { accountId: cashId, side: 'credit', amount: installment.amount }] };
+        this.record(entry);
+        installment.paidEntryId = entry.id;
+        this.db.prepare('UPDATE card_plans SET data = ? WHERE id = ?').run(JSON.stringify(plan), planId);
+        return entry;
+      });
+      const result = { entries, total: entries.reduce((sum, entry) => sum + entry.postings[0].amount, 0),
+        ...(requestId ? { id: requestId, actor, payloadHash } : {}) };
+      if (!Number.isSafeInteger(result.total)) throw new Error('Payment total exceeds supported range');
+      if (requestId) this.db.prepare('INSERT INTO card_payment_batches (id, data) VALUES (?, ?)')
+        .run(requestId, JSON.stringify(result));
+      return { ...result, duplicate: false };
     });
   }
 

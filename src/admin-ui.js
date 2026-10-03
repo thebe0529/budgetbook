@@ -9,7 +9,7 @@ import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
-import { cardCashDefault, setCardCashDefault, recordCardPurchase, recordCardPayment, visibleCardSchedule } from './card-manual.js';
+import { cardCashDefault, setCardCashDefault, recordCardPurchase, recordCardPayment, recordCardPaymentBatch, visibleCardSchedule } from './card-manual.js';
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
@@ -389,7 +389,8 @@ function renderCards(book, session, throughDate, message = '') {
     (grouped.get(row.dueDate.slice(0, 7)) ?? 0) + row.amount);
   const months = [...grouped].map(([month, total]) =>
     `<tr><td>${escape(month)}</td><td>${escape(total.toLocaleString('ko-KR'))}원</td></tr>`).join('');
-  const rows = schedule.map(row => `<tr><td>${escape(row.dueDate)}</td>
+  const rows = schedule.map(row => `<tr><td>${cash.length && canAccessAccount(book, session.sub, row.cardId, 'write') ?
+    `<input type="checkbox" form="card-bulk-pay" name="item" value="${escape(JSON.stringify([row.planId, row.index]))}" aria-label="${escape(row.memo)} ${row.index}회차 선택" style="width:auto">` : ''}</td><td>${escape(row.dueDate)}</td>
     <td>${escape(accounts.find(a => a.id === row.cardId)?.name ?? '')}</td>
     <td>${escape(row.memo)}</td><td>${row.index}회차</td>
     <td>${escape(row.amount.toLocaleString('ko-KR'))}원</td><td>${cash.length &&
@@ -407,7 +408,13 @@ function renderCards(book, session, throughDate, message = '') {
     <form method="get" action="/admin/cards"><label>조회 종료일</label>
     <input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
     <table><tr><th>월</th><th>결제 예정액</th></tr>${months}</table>
-    <table><tr><th>예정일</th><th>카드</th><th>메모</th><th>회차</th><th>금액</th><th>결제</th></tr>${rows}</table>`);
+    <table><tr><th>묶음 선택</th><th>예정일</th><th>카드</th><th>메모</th><th>회차</th><th>금액</th><th>결제</th></tr>${rows}</table>
+    ${cards.length && cash.length ? `<h2>선택한 회차 묶음 납부</h2><p>2~100회차를 선택하고 실제 결제일과 공통 출금 계좌를 지정하세요.</p>
+    <form id="card-bulk-pay" method="post" action="/admin/cards/pay-batch">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="requestId" value="${randomUUID()}">
+    <input type="hidden" name="throughDate" value="${escape(throughDate)}">
+    <label>실제 결제일</label><input type="date" name="date" required>
+    <label>묶음 납부 출금 계좌</label><select name="cashId">${options(cash)}</select><button>선택한 회차 납부 기록</button></form>` : ''}`);
 }
 
 function renderForecast(book, session, query, message = '') {
@@ -740,6 +747,22 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       assertDate(throughDate);
       setCardCashDefault(book, session.sub, form.get('cardId'), form.get('cashId') || null);
       sendHtml(res, 200, renderCards(book, session, throughDate, '<p class="notice">카드 기본 출금 계좌를 저장했습니다.</p>'));
+      return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/cards/pay-batch') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const throughDate = form.get('throughDate');
+      assertDate(throughDate);
+      const items = form.getAll('item').map(value => {
+        const parsed = JSON.parse(value);
+        if (!Array.isArray(parsed) || parsed.length !== 2) throw new Error('Invalid installment selection');
+        return { planId: parsed[0], index: parsed[1] };
+      });
+      const result = recordCardPaymentBatch(book, session.sub, { items, requestId: form.get('requestId'),
+        date: form.get('date'), cashId: form.get('cashId') });
+      sendHtml(res, 200, renderCards(book, session, throughDate,
+        `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 묶음 납부: ${result.entries.length}회차, ${result.total.toLocaleString('ko-KR')}원</p>`));
       return true;
     }
     if (req.method === 'POST' && ['/admin/cards/purchase', '/admin/cards/pay'].includes(pathname)) {
