@@ -1,4 +1,4 @@
-import { periodLockMessage, correctRejectedDate } from './local-policy.js';
+import { periodLockMessage, correctRejectedDate, canCorrectRejectedDate, localTransactionInput } from './local-policy.js';
 
 const notice = document.querySelector('#notice');
 const form = document.querySelector('#transaction-form');
@@ -114,8 +114,12 @@ function resetEditor() {
   delete form.dataset.editId;
   delete form.dataset.editRevision;
   delete form.dataset.editAccountId;
+  delete form.dataset.editType;
+  delete form.dataset.editHash;
+  delete form.dataset.editKind;
   form.elements.mode.disabled = false;
   form.elements.accountId.disabled = false;
+  form.elements.kind.disabled = false;
   document.querySelector('#cancel-edit').hidden = true;
   form.reset();
   document.querySelector('#split-rows').replaceChildren(splitRow(), splitRow());
@@ -128,6 +132,7 @@ function editSplit(account, row) {
     return;
   }
   form.dataset.editId = row.id;
+  form.dataset.editType = 'split';
   form.dataset.editRevision = String(row.split.revision);
   form.dataset.editAccountId = account.id;
   form.elements.mode.value = 'split';
@@ -146,8 +151,38 @@ function editSplit(account, row) {
   }
   form.elements.mode.disabled = true;
   form.elements.accountId.disabled = true;
+  form.elements.kind.disabled = false;
   document.querySelector('#cancel-edit').hidden = false;
+  render();
   status(`${row.date} 분할 거래 수정 중 · 서버의 거래 버전 ${row.split.revision}`);
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function editManual(account, row) {
+  if (state.pending.some(p => p.entryId === row.id)) {
+    status('이 거래의 수정 요청이 이미 대기 중입니다. 먼저 동기화하거나 해당 요청을 삭제하세요.');
+    return;
+  }
+  form.dataset.editId = row.id;
+  form.dataset.editType = 'manual';
+  form.dataset.editHash = row.manual.expectedHash;
+  form.dataset.editKind = row.manual.manualKind;
+  form.dataset.editAccountId = account.id;
+  form.elements.mode.value = 'single';
+  form.elements.kind.value = row.manual.manualKind;
+  form.elements.accountId.value = account.id;
+  form.elements.date.value = row.date;
+  form.elements.memo.value = row.memo;
+  render();
+  form.elements.counterId.value = row.manual.counterId;
+  form.elements.amountExpression.value = String(row.manual.amount);
+  form.elements.categoryId.value = row.manual.categoryId ?? '';
+  form.elements.mode.disabled = true;
+  form.elements.accountId.disabled = true;
+  form.elements.kind.disabled = true;
+  document.querySelector('#cancel-edit').hidden = false;
+  render();
+  status(`${row.date} 단순 거래 수정 중 · 계좌와 유형은 유지하며 확인 표시는 다시 확인해야 합니다.`);
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -203,6 +238,13 @@ function render() {
       edit.addEventListener('click', () => editSplit(source, row));
       li.append(edit);
     }
+    if (row.manual && !row.locked) {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.textContent = '단순 수정';
+      edit.addEventListener('click', () => editManual(source, row));
+      li.append(edit);
+    }
     return li;
   }));
   const queue = document.querySelector('#queue');
@@ -211,14 +253,14 @@ function render() {
     li.textContent = ['split', 'split-update'].includes(item.kind) ?
       `${item.date} ${item.memo || item.splitKind} · ${item.kind === 'split-update' ? '수정' : '분할'}
       ${item.lines.length}행 (${item.lines.map(l => l.amountExpression).join(' + ')}) ` :
-      `${item.date} ${item.memo || item.kind} · ${item.amountExpression}원 `;
+      `${item.date} ${item.memo || item.manualKind || item.kind} · ${item.kind === 'manual-update' ? '단순 수정 · ' : ''}${item.amountExpression}원 `;
     const warning = periodLockMessage(snapshot, item);
     if (warning || item.syncError) {
       const error = document.createElement('p');
       error.textContent = item.syncError?.message || warning;
       li.append(error);
     }
-    if (item.syncError?.code === 'PERIOD_LOCKED' && item.kind !== 'split-update') {
+    if (canCorrectRejectedDate(item)) {
       const label = document.createElement('label');
       label.textContent = '실제 거래일 확인 후 수정';
       const date = document.createElement('input');
@@ -256,7 +298,7 @@ function render() {
   document.querySelector('#sync-button').disabled = syncing || queueEditing || !state.pending.length;
   document.querySelector('#lock-button').disabled = syncing || queueEditing;
   document.querySelector('#period-warning').textContent = periodLockMessage(snapshot, {
-    kind: form.dataset.editId ? 'split-update' : split ? 'split' : kind,
+    kind: form.dataset.editId ? form.dataset.editType === 'manual' ? 'manual-update' : 'split-update' : split ? 'split' : kind,
     accountId: form.dataset.editAccountId || accountSelect.value, entryId: form.dataset.editId,
     date: form.elements.date.value, counterId: split ? null : form.elements.counterId.value,
     lines: split ? [...rows.children].map(row => ({ counterId: row.querySelector('[name="splitCounterId"]').value })) : [] });
@@ -350,7 +392,7 @@ document.querySelector('#add-split-row').addEventListener('click', () => {
 });
 document.querySelector('#cancel-edit').addEventListener('click', () => {
   resetEditor();
-  status('분할 거래 수정을 취소했습니다.');
+  status('거래 수정을 취소했습니다.');
 });
 form.addEventListener('submit', async event => {
   event.preventDefault();
@@ -359,35 +401,20 @@ form.addEventListener('submit', async event => {
     status('오프라인 이용 기간이 지났습니다. 먼저 서버에서 로그인하고 동기화하세요.'); return;
   }
   const values = new FormData(form);
-  const data = Object.fromEntries(values);
   const editing = Boolean(form.dataset.editId);
-  let input = { requestId: crypto.randomUUID(), date: data.date,
-    accountId: editing ? form.dataset.editAccountId : data.accountId, memo: data.memo };
-  if (editing || data.mode === 'split') {
-    const counters = values.getAll('splitCounterId');
-    const amounts = values.getAll('splitAmount');
-    const categories = values.getAll('splitCategory');
-    if (counters.length < 2 || counters.length !== amounts.length ||
-      (categories.length && categories.length !== counters.length) ||
-      categories.some(Boolean) && categories.some(value => !value)) {
-      status('분할 거래 행과 예산 카테고리를 확인하세요.'); return;
-    }
-    input = { ...input, kind: editing ? 'split-update' : 'split', splitKind: data.kind,
-      ...(editing ? { entryId: form.dataset.editId,
-        expectedRevision: Number(form.dataset.editRevision) } : {}),
-      lines: counters.map((counterId, i) => ({ counterId, amountExpression: amounts[i],
-        categoryId: categories[i] || null })) };
-  } else {
-    input = { ...input, kind: data.kind, counterId: data.counterId,
-      amountExpression: data.amountExpression, categoryId: data.categoryId || null };
-  }
+  let input;
+  try {
+    input = localTransactionInput(values, { entryId: form.dataset.editId, type: form.dataset.editType,
+      accountId: form.dataset.editAccountId, expectedHash: form.dataset.editHash,
+      manualKind: form.dataset.editKind, expectedRevision: Number(form.dataset.editRevision) }, crypto.randomUUID());
+  } catch (error) { status(error.message); return; }
   const warning = periodLockMessage(state.snapshot, input);
   if (warning) { status(warning); return; }
   state.pending.push(input);
   try { await save(); }
   catch (error) { state.pending.pop(); status(`로컬 저장 실패: ${error.message}`); return; }
   resetEditor();
-  status(editing ? '분할 거래 수정 요청을 이 기기에 저장했습니다. 동기화 전 원거래는 변경되지 않습니다.' :
+  status(editing ? '거래 수정 요청을 이 기기에 저장했습니다. 동기화 전 원거래는 변경되지 않습니다.' :
     '거래를 이 기기에 암호화해 저장했습니다. 서버 전송 전에는 잔액에 반영되지 않습니다.');
   if (navigator.onLine) sync();
 });

@@ -1,6 +1,7 @@
 import { visibleAccounts, canAccessAccount } from './members.js';
 import { accountRegister, recordManual } from './manual.js';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
+import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
 
 export function localSnapshot(book, sub) {
   const accounts = visibleAccounts(book, sub);
@@ -20,8 +21,18 @@ export function localSnapshot(book, sub) {
           const locked = entries.get(row.id).postings.some(p => locks.has(p.accountId) && row.date <= locks.get(p.accountId));
           const entry = !locked && row.kind === 'manual-split' && row.sourceAccountId === a.id ?
             editableManual(book, sub, row.id) : null;
+          let manual = null;
+          if (!locked && row.kind === 'manual' && row.sourceAccountId === a.id) {
+            try {
+              const preview = manualEditPreview(book, sub, row.id);
+              if (['expense', 'income', 'transfer'].includes(preview.input.kind)) manual = {
+                expectedHash: preview.expectedHash, manualKind: preview.input.kind,
+                counterId: preview.input.counterId, amount: Number(preview.input.amountExpression),
+                categoryId: preview.input.categoryId || null };
+            } catch { /* No edit data without rights to the author and all original accounts. */ }
+          }
           return { id: row.id, date: row.date, memo: row.memo, movement: row.movement, locked, reversalId: row.reversalId,
-            balance: row.balance, ...(entry ? { split: { revision: entry.revision,
+            balance: row.balance, ...(manual ? { manual } : {}), ...(entry ? { split: { revision: entry.revision,
               splitKind: entry.splitKind, lines: entry.postings.filter(p => p.accountId !== a.id)
                 .map((p, i) => ({ counterId: p.accountId, amount: p.amount,
                   categoryId: entry.budgetAllocations?.[i]?.categoryId ?? null })) } } : {}) };
@@ -56,6 +67,13 @@ export function acceptLocalTransaction(book, sub, input) {
       accountId: input.accountId, memo: input.memo ?? '', lines: input.lines,
     });
     return { entry, duplicate: Boolean(sent && sent.entry_id === input.entryId && sent.actor_sub === sub) };
+  }
+  if (input.kind === 'manual-update') {
+    if (!['expense', 'income', 'transfer'].includes(input.manualKind)) throw new Error('Invalid local manual update type');
+    return updateManualTransaction(book, sub, { entryId: input.entryId, expectedHash: input.expectedHash,
+      updateRequestId: input.requestId, date: input.date, kind: input.manualKind,
+      accountId: input.accountId, counterId: input.counterId, amountExpression: input.amountExpression,
+      categoryId: input.categoryId || null, memo: input.memo ?? '' });
   }
   if (!['expense', 'income', 'transfer'].includes(input.kind)) throw new Error('Invalid local transaction');
   return recordManual(book, sub, {
