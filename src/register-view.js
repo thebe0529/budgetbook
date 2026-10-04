@@ -15,12 +15,16 @@ export function registerFilters(params) {
   return { status, fromDate, throughDate, memo, page: Number(rawPage) };
 }
 
-export function registerPage(register, filters) {
-  const rows = register.rows.filter(row =>
+export function filteredRegisterRows(register, filters) {
+  return register.rows.filter(row =>
     (filters.status === 'all' || row.checked === (filters.status === 'checked')) &&
     (!filters.fromDate || row.date >= filters.fromDate) &&
     (!filters.throughDate || row.date <= filters.throughDate) &&
     row.memo.toLocaleLowerCase('ko-KR').includes(filters.memo.toLocaleLowerCase('ko-KR')));
+}
+
+export function registerPage(register, filters) {
+  const rows = filteredRegisterRows(register, filters);
   const pages = Math.max(1, Math.ceil(rows.length / 200));
   const page = Math.min(filters.page, pages);
   return { rows: rows.slice((page - 1) * 200, page * 200), total: rows.length, pages, page,

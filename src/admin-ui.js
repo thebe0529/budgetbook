@@ -23,6 +23,7 @@ import { compareStatement, completeStatementReview, saveStatementComparison, sta
 import { accountPeriodLock, accountLockHistory, lockAccountPeriod, unlockAccountPeriod } from './account-locks.js';
 import { reviewOverview } from './review-overview.js';
 import { manualReversalPreview, reverseManualTransaction } from './manual-reversal.js';
+import { registerTransactionsCsv } from './register-export.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -116,6 +117,8 @@ function renderRegister(book, session, accountId, message = '', filters = regist
   const hiddenFilters = Object.entries({ ...filters, page: view.page }).map(([name, value]) =>
     `<input type="hidden" name="${name}" value="${escape(value)}">`).join('');
   const pageLink = number => `/admin/register?${escape(new URLSearchParams({ ...filters, accountId: selected.id, page: number }).toString())}`;
+  const exportQuery = new URLSearchParams({ ...filters, accountId: selected.id });
+  exportQuery.delete('page');
   const navigation = `<nav aria-label="거래 페이지">${view.page > 1 ? `<a href="${pageLink(view.page - 1)}">이전</a>` : ''}
     ${view.page} / ${view.pages} 페이지 ${view.page < view.pages ? `<a href="${pageLink(view.page + 1)}">다음</a>` : ''}</nav>`;
   const rows = view.rows.map(row => {
@@ -152,6 +155,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     ${periodLock ? `<p class="notice">${escape(periodLock.throughDate)}까지 거래 기간이 잠겨 있습니다.</p>` : ''}
     <p>은행 내역과 대조한 거래를 확인 표시하세요. 거래가 수정되면 표시를 다시 확인해야 합니다. 확인 표시는 원장 잔액을 변경하지 않습니다.</p>${input}
     <h2>거래 목록</h2><p>조건에 맞는 ${view.total}건 · 검색 거래 증감 합계: ${view.movement.toLocaleString('ko-KR')}원 · 페이지당 최대 200건. 잔액은 검색 조건과 무관한 전체 원장 기준입니다.</p>${navigation}
+    <p><a href="/admin/register/export.csv?${escape(exportQuery.toString())}">조건에 맞는 전체 거래 CSV 다운로드</a></p>
     ${writable ? `<form id="confirm-selected" method="post" action="/admin/register/check-selected">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
     ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
@@ -1033,6 +1037,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && pathname === '/admin/balance-check') {
       sendHtml(res, 200, renderBalanceCheck(book, session, new URL(req.url, 'http://localhost').searchParams));
       return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/register/export.csv') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const csv = registerTransactionsCsv(book, session.sub, query.get('accountId'), query);
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="budgetbook-register.csv"',
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(csv); return true;
     }
     if (req.method === 'GET' && pathname === '/admin/register') {
       const query = new URL(req.url, 'http://localhost').searchParams;
