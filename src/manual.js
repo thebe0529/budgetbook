@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { assertDate } from './ledger.js';
+import { assertDate, validateEntry } from './ledger.js';
 import { calculateAmount } from './amount-expression.js';
 import { canAccessAccount, member, visibleAccounts } from './members.js';
 import { entryFingerprint } from './transaction-checks.js';
@@ -53,12 +53,9 @@ export function createCategory(book, userSub, name) {
   return book.createBudgetCategory({ id: randomUUID(), name: name.trim() });
 }
 
-export function recordManual(book, userSub, input) {
-  const { date, kind, accountId, counterId, categoryId, amountExpression, memo = '', requestId } = input;
+export function buildManualEntry(book, userSub, input, id, createdBy = userSub, revision = 1) {
+  const { date, kind, accountId, counterId, categoryId, amountExpression, memo = '' } = input;
   if (!canAccessAccount(book, userSub, accountId, 'write')) throw new Error('Account write access required');
-  if (typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)) {
-    throw new Error('Valid request ID required');
-  }
   assertDate(date);
   if (typeof memo !== 'string' || memo.length > 500) throw new Error('Invalid memo');
   const amount = calculateAmount(amountExpression);
@@ -87,11 +84,23 @@ export function recordManual(book, userSub, input) {
   if (categoryId && (kind !== 'expense' || !account.onBudget ||
     !book.budgetCategories().has(categoryId))) throw new Error('Invalid budget category');
   const payload = { date, kind, accountId, counterId, categoryId: categoryId || null,
-    amount, memo: memo.trim(), userSub };
+    amount, memo: memo.trim(), userSub: createdBy };
   const payloadHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-  const entry = { id: `manual:${requestId}`, date, kind: 'manual', memo: payload.memo,
-    createdBy: userSub, sourceAccountId: accountId, revision: 1, payloadHash, postings,
+  const entry = { id, date, kind: 'manual', manualKind: kind, memo: payload.memo,
+    createdBy, sourceAccountId: accountId, revision, payloadHash, postings,
     ...(categoryId ? { budgetAllocations: [{ categoryId, amount }] } : {}) };
+  validateEntry(entry, accounts);
+  book.validateBudgetAllocations(entry);
+  return entry;
+}
+
+export function recordManual(book, userSub, input) {
+  const { requestId } = input;
+  if (typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)) {
+    throw new Error('Valid request ID required');
+  }
+  const entry = buildManualEntry(book, userSub, input, `manual:${requestId}`);
+  const payloadHash = entry.payloadHash;
   const existing = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entry.id);
   if (existing) {
     const previous = JSON.parse(existing.data);
@@ -101,7 +110,9 @@ export function recordManual(book, userSub, input) {
   try { book.record(entry); }
   catch (error) {
     if (!String(error.code).startsWith('SQLITE_CONSTRAINT')) throw error;
-    const previous = JSON.parse(book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entry.id).data);
+    const row = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entry.id);
+    if (!row) throw error;
+    const previous = JSON.parse(row.data);
     if (previous.payloadHash !== payloadHash) throw new Error('Request ID reused with different transaction');
     return { entry: previous, duplicate: true };
   }

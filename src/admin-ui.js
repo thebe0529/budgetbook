@@ -25,6 +25,7 @@ import { reviewOverview } from './review-overview.js';
 import { manualReversalPreview, reverseManualTransaction } from './manual-reversal.js';
 import { registerTransactionsCsv } from './register-export.js';
 import { transactionHistory } from './transaction-history.js';
+import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -128,6 +129,13 @@ function renderRegister(book, session, accountId, message = '', filters = regist
       canAccessAccount(book, session.sub, selected.id, 'write') &&
       (row.createdBy === session.sub || session.role === 'owner');
     let cancel = '';
+    let manualEdit = '';
+    if (!locked && row.kind === 'manual' && row.sourceAccountId === selected.id) {
+      try {
+        manualEditPreview(book, session.sub, row.id);
+        manualEdit = `<a href="/admin/transactions/edit?entryId=${encodeURIComponent(row.id)}">수정</a>`;
+      } catch { /* Editing requires the author/owner and every financial account's write access. */ }
+    }
     if (['manual', 'manual-split'].includes(row.kind) && row.sourceAccountId === selected.id && writable) {
       try {
         manualReversalPreview(book, session.sub, row.id);
@@ -136,6 +144,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     }
     return `<tr><td>${writable && !row.checked ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 확인 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
+      ${manualEdit}
       ${['manual', 'manual-split', 'manual-reversal'].includes(row.kind) ? `<a href="/admin/transactions/history?accountId=${encodeURIComponent(selected.id)}&amp;entryId=${encodeURIComponent(row.id)}">변경 이력</a>` : ''}
       ${row.reversalId ? ' · 취소됨 (원거래 보존)' : ''}${row.reversesEntryId ? ' · 취소 분개' : ''} ${cancel}</td>
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
@@ -162,6 +171,30 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
     ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
+}
+
+function renderManualEdit(book, session, entryId) {
+  const { input, expectedHash } = manualEditPreview(book, session.sub, entryId);
+  const account = book.accounts().get(input.accountId);
+  const counters = [...book.accounts().values()].filter(a => input.kind === 'expense' ? a.type === 'expense' :
+    input.kind === 'income' ? a.type === 'income' : input.kind === 'opening' ? a.type === 'equity' :
+    ['asset', 'liability'].includes(a.type) && a.id !== input.accountId && canAccessAccount(book, session.sub, a.id, 'write'));
+  const categoryOptions = [...book.budgetCategories().values()].map(c =>
+    `<option value="${escape(c.id)}" ${c.id === input.categoryId ? 'selected' : ''}>${escape(c.name)}</option>`).join('');
+  const kindNames = { expense: '지출', income: '수입', transfer: '이체·카드 결제', opening: '기초 잔액' };
+  return page('단순 거래 수정', `<p>원천 계좌: ${escape(account.name)} · 유형: ${kindNames[input.kind]}</p>
+    <p class="notice">수정 전 내용을 변경 이력에 보존합니다. 확인 완료 표시는 무효화되므로 다시 확인해야 합니다. 거래가 바뀌거나 관련 계좌 기간이 잠기면 저장할 수 없습니다. 원천 계좌와 거래 유형은 변경할 수 없습니다.</p>
+    <form method="post" action="/admin/transactions/update">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="entryId" value="${escape(entryId)}">
+    <input type="hidden" name="accountId" value="${escape(input.accountId)}"><input type="hidden" name="kind" value="${input.kind}">
+    <input type="hidden" name="expectedHash" value="${expectedHash}"><input type="hidden" name="updateRequestId" value="${randomUUID()}">
+    <label>일자</label><input type="date" name="date" value="${escape(input.date)}" required>
+    <label>상대 계정</label><select name="counterId">${counters.map(a => `<option value="${escape(a.id)}" ${a.id === input.counterId ? 'selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
+    <label>금액 (사칙연산 가능)</label><input name="amountExpression" value="${escape(input.amountExpression)}" required>
+    ${input.kind === 'expense' && account.onBudget ? `<label>예산 카테고리</label><select name="categoryId"><option value="">없음</option>${categoryOptions}</select>` : ''}
+    <label>메모</label><input name="memo" maxlength="500" value="${escape(input.memo)}"><button>거래 수정 저장</button></form>
+    <p><a href="/admin/transactions/history?accountId=${encodeURIComponent(input.accountId)}&amp;entryId=${encodeURIComponent(entryId)}">변경 이력</a>
+    · <a href="/admin/register?accountId=${encodeURIComponent(input.accountId)}">계좌 거래 목록으로</a></p>`);
 }
 
 function renderTransactionHistory(book, session, accountId, entryId) {
@@ -1053,6 +1086,21 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/balance-check') {
       sendHtml(res, 200, renderBalanceCheck(book, session, new URL(req.url, 'http://localhost').searchParams));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/transactions/edit') {
+      sendHtml(res, 200, renderManualEdit(book, session, new URL(req.url, 'http://localhost').searchParams.get('entryId')));
+      return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/transactions/update') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const result = updateManualTransaction(book, session.sub, { entryId: form.get('entryId'), expectedHash: form.get('expectedHash'),
+        updateRequestId: form.get('updateRequestId'), accountId: form.get('accountId'), kind: form.get('kind'), date: form.get('date'),
+        counterId: form.get('counterId'), amountExpression: form.get('amountExpression'), categoryId: form.get('categoryId') || null,
+        memo: form.get('memo') ?? '' });
+      sendHtml(res, 200, renderRegister(book, session, result.entry.sourceAccountId,
+        `<p class="notice">${result.duplicate ? '이미 처리한 수정 요청입니다.' : '거래를 수정했습니다. 변경 이력을 확인하고 거래를 다시 확인하세요.'}</p>`));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/transactions/history') {
