@@ -3,6 +3,14 @@ import { member } from './members.js';
 import { serializeCsv } from './csv.js';
 
 export const monthlyComparisonOptions = [['previous', '전월'], ['year', '전년 같은 달'], ['custom', '직접 지정한 월']];
+export const monthlyAccountTypes = [['all', '전체'], ['income', '수입'], ['expense', '지출']];
+
+export function monthlyComparisonFilters(params) {
+  const hideZero = params.get('hideZero') ?? 'false';
+  if (!['true', 'false'].includes(hideZero)) throw new Error('Invalid zero amount filter');
+  return { comparison: params.get('comparison') || 'previous', referenceMonth: params.get('referenceMonth'),
+    accountType: params.get('accountType') || 'all', accountQuery: params.get('accountQuery') || '', hideZero: hideZero === 'true' };
+}
 
 function validateMonth(month) {
   assertMonth(month);
@@ -19,10 +27,15 @@ function change(previous, current) {
   return { previous, current, delta, percent: previous === 0 ? (current === 0 ? 0 : null) : delta / Math.abs(previous) * 100 };
 }
 
-export function monthlyComparison(book, sub, month, { comparison = 'previous', referenceMonth } = {}) {
+export function monthlyComparison(book, sub, month, { comparison = 'previous', referenceMonth,
+  accountType = 'all', accountQuery = '', hideZero = false } = {}) {
   if (member(book, sub)?.role !== 'owner') throw new Error('Owner access required');
   validateMonth(month);
   if (!monthlyComparisonOptions.some(([value]) => value === comparison)) throw new Error('Invalid monthly comparison mode');
+  if (!monthlyAccountTypes.some(([value]) => value === accountType)) throw new Error('Invalid monthly account type');
+  if (typeof hideZero !== 'boolean') throw new Error('Invalid zero amount filter');
+  if (typeof accountQuery !== 'string' || accountQuery.length > 100 || /[\p{Cc}\p{Cf}]/u.test(accountQuery)) throw new Error('Invalid account search');
+  accountQuery = accountQuery.trim().normalize('NFC');
   const year = Number(month.slice(0, 4)); const number = Number(month.slice(5));
   if ((comparison === 'previous' && month === '0001-01') || (comparison === 'year' && year === 1)) {
     throw new Error('Reference month precedes the supported year range');
@@ -37,10 +50,15 @@ export function monthlyComparison(book, sub, month, { comparison = 'previous', r
   const previous = incomeStatement(accounts, entries, previousPeriod.fromDate, previousPeriod.throughDate);
   const current = incomeStatement(accounts, entries, currentPeriod.fromDate, currentPeriod.throughDate);
   const totals = ['income', 'expenses', 'result'].map(key => ({ key, ...change(previous[key], current[key]) }));
-  const rows = [...accounts.values()].filter(account => ['income', 'expense'].includes(account.type))
+  const allRows = [...accounts.values()].filter(account => ['income', 'expense'].includes(account.type))
     .map(account => ({ id: account.id, name: account.name, type: account.type,
       ...change(previous.accounts[account.id], current.accounts[account.id]) }));
-  return { comparison, previousPeriod, currentPeriod, totals, rows };
+  const search = accountQuery.toLocaleLowerCase('ko-KR');
+  const rows = allRows.filter(row => (accountType === 'all' || row.type === accountType) &&
+    row.name.normalize('NFC').toLocaleLowerCase('ko-KR').includes(search) &&
+    (!hideZero || row.previous !== 0 || row.current !== 0));
+  return { comparison, previousPeriod, currentPeriod, totals, rows, totalAccounts: allRows.length,
+    filters: { accountType, accountQuery, hideZero } };
 }
 
 export function monthlyComparisonCsv(book, sub, month, options) {
@@ -48,8 +66,11 @@ export function monthlyComparisonCsv(book, sub, month, options) {
   const labels = { income: '수입', expenses: '지출', result: '순손익', expense: '지출' };
   const row = (section, type, name, item) => [section, type, name, report.previousPeriod.month,
     report.currentPeriod.month, item.previous, item.current, item.delta,
-    item.percent === null ? '' : Number(item.percent.toFixed(2))];
-  return serializeCsv([['구분', '유형', '계정', '비교 월', '조회 월', '비교 월 금액(원)', '조회 월 금액(원)', '증감(원)', '증감률(%)'],
-    ...report.totals.map(item => row('합계', labels[item.key], '', item)),
+    item.percent === null ? '' : Number(item.percent.toFixed(2)),
+    monthlyAccountTypes.find(([value]) => value === report.filters.accountType)[1], report.filters.accountQuery,
+    report.filters.hideZero ? '예' : '아니오'];
+  return serializeCsv([['구분', '유형', '계정', '비교 월', '조회 월', '비교 월 금액(원)', '조회 월 금액(원)', '증감(원)', '증감률(%)',
+    '계정 유형 조건', '계정명 검색 조건', '양쪽 월 0원 계정 제외'],
+    ...report.totals.map(item => row('전체 합계 (계정 필터 미적용)', labels[item.key], '', item)),
     ...report.rows.map(item => row('계정', labels[item.type], item.name, item))]);
 }

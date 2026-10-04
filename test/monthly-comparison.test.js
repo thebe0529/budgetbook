@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { recordManual } from '../src/manual.js';
-import { monthlyComparison, monthlyComparisonCsv } from '../src/monthly-comparison.js';
+import { monthlyComparison, monthlyComparisonCsv, monthlyComparisonFilters } from '../src/monthly-comparison.js';
 import { manualReversalPreview, reverseManualTransaction } from '../src/manual-reversal.js';
 import { createImportApi } from '../src/import-api.js';
 
@@ -124,6 +124,69 @@ test('reference modes reject unsupported, missing, identical and out-of-range mo
     assert.throws(() => monthlyComparison(book, 'viewer', '2026-10', { comparison: 'year' }), /Owner/);
     assert.throws(() => monthlyComparisonCsv(book, 'viewer', '2026-10', { comparison: 'custom', referenceMonth: '2025-10' }), /Owner/);
   } finally { book.close(); }
+});
+
+test('account filters combine type, normalized case-insensitive names and zero amounts while preserving full totals', () => {
+  const book = setup();
+  try {
+    book.createAccount({ id: 'cafe', name: 'Café 비용', type: 'expense' });
+    create(book, '2026-09-01', 100); create(book, '2026-10-01', 200);
+    create(book, '2026-10-02', 300, { counterId: 'cafe' });
+    create(book, '2026-10-02', 1000, { kind: 'income', counterId: 'salary' });
+    const full = monthlyComparison(book, 'owner', '2026-10'); const before = book.entries();
+    const filtered = monthlyComparison(book, 'owner', '2026-10', { accountType: 'expense', accountQuery: ' CAFE\u0301 ', hideZero: true });
+    assert.deepEqual(filtered.rows.map(row => row.id), ['cafe']); assert.equal(filtered.filters.accountQuery, 'CAFÉ');
+    assert.deepEqual(filtered.totals, full.totals); assert.equal(filtered.totalAccounts, 4);
+    assert.deepEqual(monthlyComparison(book, 'owner', '2026-10', { accountType: 'income' }).rows.map(row => row.id), ['salary']);
+    assert.equal(monthlyComparison(book, 'owner', '2026-10', { hideZero: true }).rows.length, 3);
+    assert.equal(monthlyComparison(book, 'owner', '2026-10', { accountQuery: '없음' }).rows.length, 0);
+    assert.deepEqual(book.entries(), before);
+    const csv = monthlyComparisonCsv(book, 'owner', '2026-10', { accountType: 'expense', accountQuery: 'CAFÉ', hideZero: true });
+    assert.match(csv, /전체 합계 \(계정 필터 미적용\)/); assert.match(csv, /Café 비용/); assert.doesNotMatch(csv, /식비/);
+    assert.match(csv, /계정 유형 조건/); assert.match(csv, /"지출","CAFÉ","예"/);
+    assert.equal(monthlyComparison(book, 'owner', '2026-09', { hideZero: true }).rows[0].id, 'expense');
+  } finally { book.close(); }
+});
+
+test('invalid account filters are rejected and CSV filter metadata remains spreadsheet safe', () => {
+  const book = setup();
+  try {
+    for (const options of [{ accountType: 'asset' }, { hideZero: 'true' }, { accountQuery: null },
+      { accountQuery: 'x'.repeat(101) }, { accountQuery: 'a\nb' }, { accountQuery: 'a\u200bb' }]) {
+      assert.throws(() => monthlyComparison(book, 'owner', '2026-10', options));
+      assert.throws(() => monthlyComparisonCsv(book, 'owner', '2026-10', options));
+    }
+    assert.throws(() => monthlyComparisonFilters(new URLSearchParams({ hideZero: 'yes' })), /zero amount/);
+    assert.equal(monthlyComparisonFilters(new URLSearchParams()).hideZero, false);
+    assert.equal(monthlyComparisonFilters(new URLSearchParams({ hideZero: 'true' })).hideZero, true);
+    const csv = monthlyComparisonCsv(book, 'owner', '2026-10', { accountQuery: '=SUM(1,2)' });
+    assert.ok(csv.includes("'=SUM(1,2)")); assert.match(csv, /전체 합계/);
+  } finally { book.close(); }
+});
+
+test('HTTP account filters persist with custom periods and CSV while empty results retain complete totals', async () => {
+  const book = setup(); create(book, '2026-06-01', 100); create(book, '2026-10-01', 200);
+  create(book, '2026-10-01', 1000, { kind: 'income', counterId: 'salary' });
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'owner', role: 'owner', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/reports`;
+  try {
+    const params = new URLSearchParams({ month: '2026-10', comparison: 'custom', referenceMonth: '2026-06',
+      accountType: 'expense', accountQuery: '<식비 & 생활>', hideZero: 'true' });
+    const response = await fetch(`${base}/monthly?${params}`); assert.equal(response.status, 200);
+    const html = await response.text(); assert.match(html, /value="expense" selected/);
+    assert.match(html, /name="accountQuery" maxlength="100" value="&lt;식비 &amp; 생활&gt;"/);
+    assert.match(html, /name="hideZero" value="true" checked/); assert.match(html, /전체 3개 중 1개 계정 표시/);
+    const download = html.match(/href="([^\"]*\/monthly.csv\?[^\"]*)"/)[1].replaceAll('&amp;', '&');
+    const csv = await fetch(new URL(download, base)); assert.equal(csv.status, 200);
+    assert.equal((await csv.text()).replace(/^\uFEFF/, ''), monthlyComparisonCsv(book, 'owner', '2026-10', monthlyComparisonFilters(params)).replace(/^\uFEFF/, ''));
+    params.set('accountQuery', '검색 없음');
+    const empty = await (await fetch(`${base}/monthly?${params}`)).text();
+    assert.match(empty, /조건에 맞는 계정이 없습니다/); assert.match(empty, /월별 전체 합계/); assert.match(empty, /1,000/);
+    for (const bad of ['accountType=asset', 'hideZero=unknown', `accountQuery=${'x'.repeat(101)}`]) {
+      for (const suffix of ['', '.csv']) assert.equal((await fetch(`${base}/monthly${suffix}?month=2026-10&${bad}`)).status, 400);
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
 
 test('HTTP comparison selection persists in controls, drilldowns and matching CSV downloads', async () => {
