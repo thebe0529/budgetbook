@@ -110,3 +110,37 @@ test('register export HTTP returns all matched pages with scoped permissions and
     assert.equal((await fetch(`${base}/export.csv?accountId=bank&status=bad`)).status, 400);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
+
+test('HTTP register and CSV use the same filtered sort while preserving each original running balance', async () => {
+  const book = setup();
+  const second = spend(book, '2026-10-01', '거래 2', '40');
+  const first = spend(book, '2026-10-02', '거래 1', '40');
+  const tenth = spend(book, '2026-10-03', '거래 10', '80');
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'viewer', role: 'viewer', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/register`;
+  const orders = { 'date-asc': [second, first, tenth], 'date-desc': [tenth, first, second],
+    'movement-asc': [tenth, first, second], 'movement-desc': [first, second, tenth],
+    'memo-asc': [first, second, tenth], 'memo-desc': [tenth, second, first] };
+  try {
+    for (const [sort, entries] of Object.entries(orders)) {
+      const params = query({ accountId: 'bank', fromDate: '2026-10-01', memo: '거래', sort });
+      const html = await (await fetch(`${base}?${params}`)).text();
+      const exportLink = html.match(/href="(\/admin\/register\/export\.csv\?[^"]+)"/)[1];
+      assert.ok(exportLink.includes(`sort=${sort}`));
+      const csv = await (await fetch(`${base}/export.csv?${params}`)).text();
+      const csvPositions = entries.map(entry => csv.indexOf(`"${entry.id}"`));
+      const htmlPositions = entries.map(entry => html.indexOf(`<td>${entry.memo}\n`));
+      assert.ok([...csvPositions, ...htmlPositions].every(position => position >= 0));
+      assert.ok(csvPositions[0] < csvPositions[1] && csvPositions[1] < csvPositions[2]);
+      assert.ok(htmlPositions[0] < htmlPositions[1] && htmlPositions[1] < htmlPositions[2]);
+      assert.ok(csv.includes('"거래 2",-40,9960,'));
+      assert.ok(csv.includes('"거래 1",-40,9920,'));
+      assert.ok(csv.includes('"거래 10",-80,9840,'));
+      assert.ok(!csv.includes('"2026-09-30"'));
+      assert.match(html, /누적 잔액은 검색·정렬과 무관/);
+    }
+    assert.equal((await fetch(`${base}/export.csv?accountId=bank&sort=unknown`)).status, 400);
+    assert.equal(book.entries().length, 4);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});

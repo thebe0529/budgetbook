@@ -18,7 +18,7 @@ import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
-import { registerFilters, registerPage } from './register-view.js';
+import { registerFilters, registerPage, registerSortOptions } from './register-view.js';
 import { compareStatement, completeStatementReview, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
 import { accountPeriodLock, accountLockHistory, lockAccountPeriod, unlockAccountPeriod } from './account-locks.js';
 import { reviewOverview } from './review-overview.js';
@@ -169,12 +169,14 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <label>확인 상태</label><select name="status">${[['all', '전체'], ['unchecked', '미확인'], ['checked', '확인 완료']].map(([value, label]) => `<option value="${value}"${status === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
     <label>시작일</label><input type="date" name="fromDate" value="${escape(filters.fromDate)}">
     <label>종료일</label><input type="date" name="throughDate" value="${escape(filters.throughDate)}">
-    <label>메모 검색</label><input name="memo" maxlength="200" value="${escape(filters.memo)}"><button>조회</button></form>
+    <label>메모 검색</label><input name="memo" maxlength="200" value="${escape(filters.memo)}">
+    <label>정렬</label><select name="sort">${registerSortOptions.map(([value, label]) => `<option value="${value}"${filters.sort === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
+    <button>조회</button></form>
     <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원 · 확인 거래 누적 합계: ${register.checkedBalance.toLocaleString('ko-KR')}원 · 미확인 ${register.uncheckedCount}건</p>
     <p><a href="/admin/balance-check?accountId=${encodeURIComponent(selected.id)}">이 계좌의 명세서 잔액 비교</a></p>
     ${periodLock ? `<p class="notice">${escape(periodLock.throughDate)}까지 거래 기간이 잠겨 있습니다.</p>` : ''}
     <p>은행 내역과 대조한 거래를 확인 표시하세요. 거래가 수정되면 표시를 다시 확인해야 합니다. 확인 표시는 원장 잔액을 변경하지 않습니다.</p>${input}
-    <h2>거래 목록</h2><p>조건에 맞는 ${view.total}건 · 검색 거래 증감 합계: ${view.movement.toLocaleString('ko-KR')}원 · 페이지당 최대 200건. 잔액은 검색 조건과 무관한 전체 원장 기준입니다.</p>${navigation}
+    <h2>거래 목록</h2><p>조건에 맞는 ${view.total}건 · 검색 거래 증감 합계: ${view.movement.toLocaleString('ko-KR')}원 · 페이지당 최대 200건. 누적 잔액은 검색·정렬과 무관한 전체 원장 기준이며 일자순 외 정렬에서는 행 사이 잔액이 순서대로 이어지지 않습니다. 증감 정렬은 부호를 포함한 금액 기준입니다.</p>${navigation}
     <p><a href="/admin/register/export.csv?${escape(exportQuery.toString())}">조건에 맞는 전체 거래 CSV 다운로드</a></p>
     ${writable ? `<form id="confirm-selected" method="post" action="/admin/register/check-selected">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
