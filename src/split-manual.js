@@ -5,7 +5,7 @@ import { canAccessAccount, member } from './members.js';
 
 function hash(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
-function build(book, userSub, input, id, createdBy, revision) {
+export function buildSplitEntry(book, userSub, input, id, createdBy, revision) {
   const { date, kind, accountId, memo = '', lines } = input;
   assertDate(date);
   if (!canAccessAccount(book, userSub, accountId, 'write')) throw new Error('Account write access required');
@@ -65,7 +65,7 @@ export function recordSplitManual(book, userSub, input) {
   if (typeof input.requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(input.requestId)) {
     throw new Error('Valid request ID required');
   }
-  const entry = build(book, userSub, input, `manual:${input.requestId}`, userSub, 1);
+  const entry = buildSplitEntry(book, userSub, input, `manual:${input.requestId}`, userSub, 1);
   const old = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entry.id);
   if (old) {
     const previous = JSON.parse(old.data);
@@ -117,7 +117,7 @@ export function updateSplitManual(book, userSub, entryId, expectedRevision, inpu
       !canAccessAccount(book, userSub, p.accountId, 'write'))) {
       throw new Error('Original transfer destination access required');
     }
-    const next = build(book, userSub, input, entryId, previous.createdBy, previous.revision + 1);
+    const next = buildSplitEntry(book, userSub, input, entryId, previous.createdBy, previous.revision + 1);
     book.db.prepare(`INSERT INTO entry_revisions (entry_id, revision, data, actor_sub, changed_at)
       VALUES (?, ?, ?, ?, ?)`).run(entryId, previous.revision,
       JSON.stringify(previous), userSub, new Date().toISOString());

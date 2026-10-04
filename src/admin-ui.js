@@ -27,6 +27,7 @@ import { registerTransactionsCsv } from './register-export.js';
 import { transactionHistory } from './transaction-history.js';
 import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
 import { transactionCopyPreview } from './transaction-copy.js';
+import { updateSelectedMemos } from './bulk-memo.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -150,7 +151,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
         cancel = `<a href="/admin/transactions/reverse?entryId=${encodeURIComponent(row.id)}">${row.reversalId ? '취소 이력' : '거래 취소'}</a>`;
       } catch { /* No cancellation control without rights to every affected account. */ }
     }
-    return `<tr><td>${writable && !row.checked ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 확인 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
+    return `<tr><td>${writable && !locked && (!row.checked || ['manual', 'manual-split'].includes(row.kind) && !row.reversalId) ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 거래 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
       ${manualEdit}
       ${copy}
@@ -180,7 +181,11 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <p><a href="/admin/register/export.csv?${escape(exportQuery.toString())}">조건에 맞는 전체 거래 CSV 다운로드</a></p>
     ${writable ? `<form id="confirm-selected" method="post" action="/admin/register/check-selected">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
-    ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
+    ${hiddenFilters}<button>선택 거래 확인</button>
+    <p>메모 변경은 수정 권한이 있는 수동 단순·분할 거래만 선택하세요. 금액·날짜·예산은 유지하고 확인 표시는 다시 확인해야 합니다. 한 건이라도 변경·취소·잠금·권한 문제가 있으면 전체 변경을 취소합니다.</p>
+    <input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>선택 거래의 새 메모 (빈 값은 메모 지우기)</label><textarea name="newMemo" maxlength="500" rows="2"></textarea>
+    <button formaction="/admin/register/memo-selected">선택 거래 메모 변경</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
 }
 
@@ -1144,6 +1149,16 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && pathname === '/admin/register') {
       const query = new URL(req.url, 'http://localhost').searchParams;
       sendHtml(res, 200, renderRegister(book, session, query.get('accountId'), '', registerFilters(query))); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/register/memo-selected') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const filters = registerFilters(form);
+      const result = updateSelectedMemos(book, session.sub, { accountId: form.get('accountId'),
+        requestId: form.get('requestId'), memo: form.get('newMemo'), selections: form.getAll('selection').map(value => JSON.parse(value)) });
+      sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
+        `<p class="notice">${result.duplicate ? '이미 처리한 메모 변경 요청입니다.' : `${result.count}건의 메모를 변경했습니다. 변경 이력을 확인하고 거래를 다시 확인하세요.`}</p>`, filters));
+      return true;
     }
     if (req.method === 'POST' && pathname === '/admin/register/check-selected') {
       const form = await formBody(req);
