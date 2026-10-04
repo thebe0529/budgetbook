@@ -79,7 +79,7 @@ test('register export includes current lock state for confirmed cutoff rows', ()
     completeStatementReview(book, 'owner', saved.id); lockAccountPeriod(book, 'owner', saved.id, randomUUID());
     const csv = registerTransactionsCsv(book, 'viewer', 'bank', query({ fromDate: '2026-10-01' }));
     assert.ok(csv.includes('"확인 완료"'));
-    assert.ok(csv.includes('"잠금"\r\n'));
+    assert.ok(csv.includes('"잠금",""\r\n'));
   } finally { book.close(); }
 });
 

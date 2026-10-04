@@ -129,6 +129,8 @@ export function accountRegister(book, userSub, accountId, throughDate) {
   const checks = new Map(book.db.prepare('SELECT entry_id, entry_hash FROM account_entry_checks WHERE account_id = ?')
     .all(accountId).map(row => [row.entry_id, row.entry_hash]));
   const rows = [];
+  const tagRows = new Map(book.db.prepare('SELECT entry_id, data FROM transaction_tags').all()
+    .map(row => [row.entry_id, JSON.parse(row.data).tags]));
   const reversals = new Map(book.db.prepare('SELECT original_id, reversal_id FROM transaction_reversals').all()
     .map(row => [row.original_id, row.reversal_id]));
   for (const entry of book.entries()) {
@@ -139,7 +141,8 @@ export function accountRegister(book, userSub, accountId, throughDate) {
     balance += movement;
     const checked = checks.get(entry.id) === entryFingerprint(entry);
     if (checked) checkedBalance += movement;
-    rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance,
+    const tags = tagRows.get(entry.id) ?? [];
+    rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance, tags,
       kind: entry.kind, sourceAccountId: entry.sourceAccountId, createdBy: entry.createdBy, checked,
       confirmationHash: entryFingerprint(entry), reversalId: reversals.get(entry.id) ?? null,
       reversesEntryId: entry.reversesEntryId ?? null });

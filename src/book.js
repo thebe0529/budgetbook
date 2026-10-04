@@ -116,7 +116,12 @@ export class Book {
       CREATE TABLE IF NOT EXISTS bulk_memo_requests (
         request_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bulk_category_requests (
-        request_id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
+        request_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS transaction_tags (
+        entry_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS transaction_tag_changes (
+        request_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS transaction_tag_changes_entry ON transaction_tag_changes(entry_id);`);
   }
 
   close() { this.db.close(); }

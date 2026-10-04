@@ -28,6 +28,7 @@ import { transactionHistory } from './transaction-history.js';
 import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
 import { transactionCopyPreview } from './transaction-copy.js';
 import { updateSelectedMemos, updateSelectedCategories } from './bulk-memo.js';
+import { tagEditPreview, updateTransactionTags } from './transaction-tags.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -133,6 +134,11 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     let cancel = '';
     let manualEdit = '';
     let copy = '';
+    let tagEdit = '';
+    try {
+      tagEditPreview(book, session.sub, selected.id, row.id);
+      tagEdit = `<a href="/admin/transactions/tags?${escape(new URLSearchParams({ ...filters, accountId: selected.id, entryId: row.id }).toString())}">태그 수정</a>`;
+    } catch { /* Tag editing requires author/owner and all financial write permissions. */ }
     if (['manual', 'manual-split'].includes(row.kind) && row.sourceAccountId === selected.id && !row.reversalId) {
       try {
         transactionCopyPreview(book, session.sub, row.id);
@@ -155,6 +161,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
       ${manualEdit}
       ${copy}
+      <span>태그: ${row.tags.length ? row.tags.map(tag => escape(tag)).join(' · ') : '없음'}</span> ${tagEdit}
       ${['manual', 'manual-split', 'manual-reversal'].includes(row.kind) ? `<a href="/admin/transactions/history?accountId=${encodeURIComponent(selected.id)}&amp;entryId=${encodeURIComponent(row.id)}">변경 이력</a>` : ''}
       ${row.reversalId ? ' · 취소됨 (원거래 보존)' : ''}${row.reversesEntryId ? ' · 취소 분개' : ''} ${cancel}</td>
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
@@ -171,6 +178,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <label>시작일</label><input type="date" name="fromDate" value="${escape(filters.fromDate)}">
     <label>종료일</label><input type="date" name="throughDate" value="${escape(filters.throughDate)}">
     <label>메모 검색</label><input name="memo" maxlength="200" value="${escape(filters.memo)}">
+    <label>태그 검색 (이름 정확히 일치)</label><input name="tag" maxlength="30" value="${escape(filters.tag ?? '')}">
     <label>정렬</label><select name="sort">${registerSortOptions.map(([value, label]) => `<option value="${value}"${filters.sort === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
     <button>조회</button></form>
     <p>잔액: ${escape(register.balance.toLocaleString('ko-KR'))}원 · 확인 거래 누적 합계: ${register.checkedBalance.toLocaleString('ko-KR')}원 · 미확인 ${register.uncheckedCount}건</p>
@@ -190,6 +198,16 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <label>선택 지출의 새 예산 카테고리</label><select name="newCategoryId"><option value="">없음 (예산 배분 해제)</option>${categories}</select>
     <button formaction="/admin/register/category-selected">선택 지출 예산 변경</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
+}
+
+function renderTagEdit(book, session, accountId, entryId, filters) {
+  const preview = tagEditPreview(book, session.sub, accountId, entryId);
+  return page('거래 태그 수정', `<p>${escape(preview.entry.date)} · ${escape(preview.entry.memo ?? '')}</p>
+    <p>쉼표로 구분해 최대 10개, 태그당 30자까지 입력하세요. 빈 값은 모든 태그를 지웁니다. 태그는 금액·예산·거래 확인 상태를 바꾸지 않으며 잠긴 기간에도 수정할 수 있습니다.</p>
+    <form method="post" action="/admin/transactions/tags">
+    ${Object.entries({ ...filters, accountId, entryId, csrf: session.csrf, expectedHash: preview.expectedHash,
+      tagsHash: preview.tagsHash, requestId: randomUUID() }).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('')}
+    <label>태그</label><input name="tags" maxlength="500" value="${escape(preview.tags.join(', '))}"><button>태그 저장</button></form>`);
 }
 
 function renderManualEdit(book, session, entryId, copying = false) {
@@ -228,6 +246,8 @@ function renderTransactionHistory(book, session, accountId, entryId) {
     ${entry.budgetAllocations.length ? `<p>예산 배분: ${entry.budgetAllocations.map(item => `${escape(item.categoryName)} ${escape(item.amount.toLocaleString('ko-KR'))}원`).join(' · ')}</p>` : '<p>예산 배분 없음</p>'}`;
   return page('거래 변경 이력', `<p><a href="/admin/register?accountId=${encodeURIComponent(accountId)}">계좌 거래 목록으로</a></p>
     <p>원거래 ID: ${escape(history.originalId)}</p><p>읽기 전용 이력입니다. 계정·카테고리 이름은 현재 이름이며 처리 시각은 UTC입니다. 최초 등록 시각은 저장되어 있지 않습니다.</p>
+    <h2>태그 이력</h2><p>현재 태그: ${escape(history.tags.join(', ') || '없음')}</p>
+    ${history.tagChanges.map(change => `<p>${escape(change.changedAt)} · ${escape(change.actor)}: ${escape(change.before.join(', ') || '없음')} → ${escape(change.after.join(', ') || '없음')}</p>`).join('') || '<p>태그 변경 이력 없음</p>'}
     ${history.versions.map((version, index) => `<section><h2>버전 ${escape(version.revision)}${index === history.versions.length - 1 ? ' (현재 원거래)' : ''}</h2>
       <p>${index ? '수정자' : '작성자'}: ${escape(version.actor)} · ${version.changedAt ? `수정 시각: ${escape(version.changedAt)}` : '최초 등록'}</p>${details(version)}</section>`).join('')}
     ${history.reversal ? `<section><h2>거래 취소</h2><p>취소일: ${escape(history.reversal.date)} · 취소자: ${escape(history.reversal.actor)} · 처리 시각: ${escape(history.reversal.createdAt)}</p>
@@ -1152,6 +1172,18 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && pathname === '/admin/register') {
       const query = new URL(req.url, 'http://localhost').searchParams;
       sendHtml(res, 200, renderRegister(book, session, query.get('accountId'), '', registerFilters(query))); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/transactions/tags') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      sendHtml(res, 200, renderTagEdit(book, session, query.get('accountId'), query.get('entryId'), registerFilters(query))); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/transactions/tags') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const filters = registerFilters(form);
+      const result = updateTransactionTags(book, session.sub, Object.fromEntries(form));
+      sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
+        `<p class="notice">${result.duplicate ? '이미 처리한 태그 변경 요청입니다.' : '태그를 저장했습니다.'}</p>`, filters)); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/register/category-selected') {
       const form = await formBody(req);

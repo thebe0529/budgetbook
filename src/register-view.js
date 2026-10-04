@@ -9,6 +9,7 @@ export function registerFilters(params) {
   const fromDate = params.get('fromDate') || '';
   const throughDate = params.get('throughDate') || '';
   const memo = (params.get('memo') || '').trim();
+  const tag = (params.get('tag') || '').trim().normalize('NFC');
   const rawPage = params.get('page') || '1';
   const sort = params.get('sort') || 'date-desc';
   if (!['all', 'unchecked', 'checked'].includes(status)) throw new Error('Invalid transaction filter');
@@ -16,9 +17,10 @@ export function registerFilters(params) {
   if (throughDate) assertDate(throughDate);
   if (fromDate && throughDate && fromDate > throughDate) throw new Error('Invalid date range');
   if (memo.length > 200) throw new Error('Memo search is too long');
+  if (tag.length > 30 || /[,\p{Cc}\p{Cf}]/u.test(tag)) throw new Error('Invalid tag search');
   if (!/^[1-9]\d*$/.test(rawPage) || !Number.isSafeInteger(Number(rawPage))) throw new Error('Invalid page');
   if (!registerSortOptions.some(([value]) => value === sort)) throw new Error('Invalid transaction sort');
-  return { status, fromDate, throughDate, memo, sort, page: Number(rawPage) };
+  return { status, fromDate, throughDate, memo, tag, sort, page: Number(rawPage) };
 }
 
 export function filteredRegisterRows(register, filters) {
@@ -26,7 +28,8 @@ export function filteredRegisterRows(register, filters) {
     (filters.status === 'all' || row.checked === (filters.status === 'checked')) &&
     (!filters.fromDate || row.date >= filters.fromDate) &&
     (!filters.throughDate || row.date <= filters.throughDate) &&
-    row.memo.toLocaleLowerCase('ko-KR').includes(filters.memo.toLocaleLowerCase('ko-KR')));
+    row.memo.toLocaleLowerCase('ko-KR').includes(filters.memo.toLocaleLowerCase('ko-KR')) &&
+    (!filters.tag || (row.tags ?? []).includes(filters.tag)));
   const sort = filters.sort ?? 'date-desc';
   if (!registerSortOptions.some(([value]) => value === sort)) throw new Error('Invalid transaction sort');
   const field = sort.startsWith('date-') ? 'date' : sort.startsWith('movement-') ? 'movement' : 'memo';

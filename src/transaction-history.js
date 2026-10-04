@@ -1,4 +1,5 @@
 import { canAccessAccount } from './members.js';
+import { transactionTags } from './transaction-tags.js';
 
 export function transactionHistory(book, sub, accountId, entryId) {
   const denied = () => { throw new Error('Transaction history read access required'); };
@@ -30,6 +31,9 @@ export function transactionHistory(book, sub, accountId, entryId) {
     budgetAllocations: (entry.budgetAllocations ?? []).map(item => ({ ...item,
       categoryName: book.budgetCategories().get(item.categoryId)?.name ?? item.categoryId })) });
   return { accountId, originalId: original.id,
+    tags: transactionTags(book, original.id).tags,
+    tagChanges: book.db.prepare('SELECT data FROM transaction_tag_changes WHERE entry_id = ? ORDER BY rowid').all(original.id)
+      .map(row => { const { before, after, actor, changedAt } = JSON.parse(row.data); return { before, after, actor, changedAt }; }),
     versions: versions.map((entry, index) => ({ ...snapshot(entry),
       actor: index ? revisions[index - 1].actor_sub : entry.createdBy,
       changedAt: index ? revisions[index - 1].changed_at : null })),
