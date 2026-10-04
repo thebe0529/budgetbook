@@ -21,6 +21,7 @@ import { confirmTransactions, setTransactionChecked } from './transaction-checks
 import { registerFilters, registerPage } from './register-view.js';
 import { compareStatement, completeStatementReview, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
 import { accountPeriodLock, accountLockHistory, lockAccountPeriod, unlockAccountPeriod } from './account-locks.js';
+import { reviewOverview } from './review-overview.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -32,11 +33,12 @@ function page(title, content) {
     body{font:16px system-ui,sans-serif;max-width:850px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#172333}
     label{display:block;margin-top:1rem;font-weight:650}input,textarea,select{box-sizing:border-box;width:100%;padding:.6rem;font:inherit}
     button{padding:.65rem 1rem;margin-top:1rem;background:#174a7e;color:white;border:0;border-radius:5px;cursor:pointer}
-    pre{white-space:pre-wrap;background:#eef3f8;padding:1rem;border-radius:5px}nav{display:flex;gap:1rem}
+    pre{white-space:pre-wrap;background:#eef3f8;padding:1rem;border-radius:5px}nav{display:flex;gap:1rem;flex-wrap:wrap}
+    .table-scroll{overflow-x:auto}.table-scroll table{min-width:760px}
     .notice{padding:1rem;background:#eaf5ed}.error{padding:1rem;background:#ffedeb}
     table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #d8e1eb;padding:.5rem;text-align:left}
     </style></head><body><nav><a href="/admin/accounts">계좌</a><a href="/admin/budget">예산</a>
-    <a href="/admin/reports">보고서</a><a href="/admin/balance-check">명세서 잔액 비교</a><a href="/admin/adjustments">일괄 조정</a>
+    <a href="/admin/reports">보고서</a><a href="/admin/review-overview">검토·잠금 현황</a><a href="/admin/balance-check">명세서 잔액 비교</a><a href="/admin/adjustments">일괄 조정</a>
     <a href="/admin/cards">카드 예정액</a>
     <a href="/admin/forecast">현금흐름 예상</a>
     <a href="/admin/review">수신 검토</a><a href="/admin/regex">정규식 설정</a>
@@ -145,6 +147,37 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
     ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
+}
+
+function renderReviewOverview(book, session, query) {
+  const throughDate = query.get('throughDate') || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  const filter = query.get('status') || 'all';
+  if (!['all', 'attention'].includes(filter)) throw new Error('Invalid overview filter');
+  const overview = reviewOverview(book, session.sub, throughDate);
+  const labels = { none: '비교 이력 없음', changed: '저장 후 변경 · 재검토 필요', difference: '잔액 차이 있음',
+    unchecked: '저장 당시 미확인 거래 있음', ready: '검토 완료 표시 가능', reviewed: '검토 완료' };
+  const rows = overview.rows.filter(row => filter === 'all' || row.needsAttention).map(row => {
+    const register = `/admin/register?${escape(new URLSearchParams({ accountId: row.account.id, throughDate, status: 'unchecked' }).toString())}`;
+    const compare = `/admin/balance-check?${escape(new URLSearchParams({ accountId: row.account.id, throughDate }).toString())}`;
+    const saved = row.comparison ? `/admin/balance-check?${escape(new URLSearchParams({ accountId: row.account.id,
+      throughDate: row.comparison.throughDate, statementBalance: row.comparison.statementBalance }).toString())}` : '';
+    return `<tr><td>${escape(row.account.name)} (${row.account.type === 'asset' ? '자산' : '부채'})</td>
+      <td>${row.balance.toLocaleString('ko-KR')}원</td><td><a href="${register}">${row.uncheckedCount}건</a></td>
+      <td>${row.comparison ? `<a href="${saved}">${escape(row.comparison.throughDate)}</a>` : '없음'}
+      ${row.olderCutoff ? '<br>조회 기준일보다 이전' : ''}</td>
+      <td>${labels[row.status]}</td><td>${row.comparison ? `${row.comparison.difference.toLocaleString('ko-KR')}원` : '—'}</td>
+      <td>${row.lockedThroughDate ? `${escape(row.lockedThroughDate)}까지` : '잠금 없음'}</td>
+      <td><a href="${compare}">기준일 잔액 비교</a></td></tr>`;
+  }).join('');
+  return page('계좌 검토·잠금 현황', `<form method="get" action="/admin/review-overview">
+    <label>조회 기준일</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
+    <label>표시</label><select name="status"><option value="all"${filter === 'all' ? ' selected' : ''}>전체 계좌</option>
+    <option value="attention"${filter === 'attention' ? ' selected' : ''}>확인 필요 계좌</option></select><button>조회</button></form>
+    <p>접근 가능한 ${overview.rows.length}개 계좌 · 확인 필요 ${overview.attentionCount}개 · 미확인 거래가 있는 계좌 ${overview.uncheckedAccountCount}개</p>
+    <p>잔액과 미확인 건수는 조회 기준일까지의 거래입니다. 최근 비교는 기준일이 조회일 이하인 이력 중 가장 최근에 저장한 결과입니다. 차이는 저장 당시 명세서 잔액에서 원장 잔액을 뺀 금액입니다. 잠금은 현재 상태를 표시합니다.</p>
+    <p>조회일보다 이전 비교만 있거나, 미확인 거래·잔액 차이·저장 후 변경·검토 미완료가 있으면 확인 필요로 분류합니다.</p>
+    <div class="table-scroll"><table><tr><th>계좌</th><th>기준일 잔액</th><th>미확인</th><th>최근 비교 기준일</th><th>최근 비교 상태</th><th>저장 당시 차이</th><th>현재 잠금 기준일</th><th>작업</th></tr>
+    ${rows || '<tr><td colspan="8">조건에 맞는 계좌가 없습니다.</td></tr>'}</table></div>`);
 }
 
 function renderBalanceCheck(book, session, query, message = '') {
@@ -952,6 +985,10 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       saveStatementComparison(book, session.sub, { accountId: form.get('accountId'), throughDate: form.get('throughDate'),
         statementExpression: form.get('statementBalance'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId') });
       sendHtml(res, 200, renderBalanceCheck(book, session, form, '<p class="notice">비교 결과 이력을 저장했습니다.</p>'));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/review-overview') {
+      sendHtml(res, 200, renderReviewOverview(book, session, new URL(req.url, 'http://localhost').searchParams));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/balance-check') {
