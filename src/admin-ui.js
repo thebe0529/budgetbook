@@ -24,6 +24,7 @@ import { accountPeriodLock, accountLockHistory, lockAccountPeriod, unlockAccount
 import { reviewOverview } from './review-overview.js';
 import { manualReversalPreview, reverseManualTransaction } from './manual-reversal.js';
 import { registerTransactionsCsv } from './register-export.js';
+import { transactionHistory } from './transaction-history.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -135,6 +136,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     }
     return `<tr><td>${writable && !row.checked ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 확인 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
+      ${['manual', 'manual-split', 'manual-reversal'].includes(row.kind) ? `<a href="/admin/transactions/history?accountId=${encodeURIComponent(selected.id)}&amp;entryId=${encodeURIComponent(row.id)}">변경 이력</a>` : ''}
       ${row.reversalId ? ' · 취소됨 (원거래 보존)' : ''}${row.reversesEntryId ? ' · 취소 분개' : ''} ${cancel}</td>
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
     <td>${row.checked ? '확인 완료' : '미확인'}${locked ? ' · 기간 잠금' : ''}${!locked && canAccessAccount(book, session.sub, selected.id, 'write') ?
@@ -160,6 +162,21 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
     ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
+}
+
+function renderTransactionHistory(book, session, accountId, entryId) {
+  const history = transactionHistory(book, session.sub, accountId, entryId);
+  const details = entry => `<p>거래일: ${escape(entry.date)} · 메모: ${escape(entry.memo)}</p>
+    <div class="table-scroll"><table><thead><tr><th>계정</th><th>차변(원)</th><th>대변(원)</th></tr></thead><tbody>
+    ${entry.postings.map(p => `<tr><td>${escape(p.accountName)}</td><td>${p.side === 'debit' ? escape(p.amount.toLocaleString('ko-KR')) : ''}</td>
+      <td>${p.side === 'credit' ? escape(p.amount.toLocaleString('ko-KR')) : ''}</td></tr>`).join('')}</tbody></table></div>
+    ${entry.budgetAllocations.length ? `<p>예산 배분: ${entry.budgetAllocations.map(item => `${escape(item.categoryName)} ${escape(item.amount.toLocaleString('ko-KR'))}원`).join(' · ')}</p>` : '<p>예산 배분 없음</p>'}`;
+  return page('거래 변경 이력', `<p><a href="/admin/register?accountId=${encodeURIComponent(accountId)}">계좌 거래 목록으로</a></p>
+    <p>원거래 ID: ${escape(history.originalId)}</p><p>읽기 전용 이력입니다. 계정·카테고리 이름은 현재 이름이며 처리 시각은 UTC입니다. 최초 등록 시각은 저장되어 있지 않습니다.</p>
+    ${history.versions.map((version, index) => `<section><h2>버전 ${escape(version.revision)}${index === history.versions.length - 1 ? ' (현재 원거래)' : ''}</h2>
+      <p>${index ? '수정자' : '작성자'}: ${escape(version.actor)} · ${version.changedAt ? `수정 시각: ${escape(version.changedAt)}` : '최초 등록'}</p>${details(version)}</section>`).join('')}
+    ${history.reversal ? `<section><h2>거래 취소</h2><p>취소일: ${escape(history.reversal.date)} · 취소자: ${escape(history.reversal.actor)} · 처리 시각: ${escape(history.reversal.createdAt)}</p>
+      <p>사유: ${escape(history.reversal.reason)}</p><p>취소 분개 ID: ${escape(history.reversal.entry.id)}</p>${details(history.reversal.entry)}</section>` : '<p>취소 이력 없음</p>'}`);
 }
 
 function renderManualReversal(book, session, entryId, message = '') {
@@ -1036,6 +1053,11 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/balance-check') {
       sendHtml(res, 200, renderBalanceCheck(book, session, new URL(req.url, 'http://localhost').searchParams));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/transactions/history') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      sendHtml(res, 200, renderTransactionHistory(book, session, query.get('accountId'), query.get('entryId')));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/register/export.csv') {
