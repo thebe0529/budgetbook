@@ -22,6 +22,7 @@ import { registerFilters, registerPage } from './register-view.js';
 import { compareStatement, completeStatementReview, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
 import { accountPeriodLock, accountLockHistory, lockAccountPeriod, unlockAccountPeriod } from './account-locks.js';
 import { reviewOverview } from './review-overview.js';
+import { manualReversalPreview, reverseManualTransaction } from './manual-reversal.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -119,11 +120,19 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     ${view.page} / ${view.pages} 페이지 ${view.page < view.pages ? `<a href="${pageLink(view.page + 1)}">다음</a>` : ''}</nav>`;
   const rows = view.rows.map(row => {
     const locked = periodLock && row.date <= periodLock.throughDate;
-    const editable = !locked && row.kind === 'manual-split' && row.sourceAccountId === selected.id &&
+    const editable = !locked && !row.reversalId && row.kind === 'manual-split' && row.sourceAccountId === selected.id &&
       canAccessAccount(book, session.sub, selected.id, 'write') &&
       (row.createdBy === session.sub || session.role === 'owner');
+    let cancel = '';
+    if (['manual', 'manual-split'].includes(row.kind) && row.sourceAccountId === selected.id && writable) {
+      try {
+        manualReversalPreview(book, session.sub, row.id);
+        cancel = `<a href="/admin/transactions/reverse?entryId=${encodeURIComponent(row.id)}">${row.reversalId ? '취소 이력' : '거래 취소'}</a>`;
+      } catch { /* No cancellation control without rights to every affected account. */ }
+    }
     return `<tr><td>${writable && !row.checked ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 확인 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
-      ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}</td>
+      ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
+      ${row.reversalId ? ' · 취소됨 (원거래 보존)' : ''}${row.reversesEntryId ? ' · 취소 분개' : ''} ${cancel}</td>
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
     <td>${row.checked ? '확인 완료' : '미확인'}${locked ? ' · 기간 잠금' : ''}${!locked && canAccessAccount(book, session.sub, selected.id, 'write') ?
     `<form method="post" action="/admin/register/check"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
@@ -147,6 +156,24 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(selected.id)}">
     ${hiddenFilters}<button>선택 거래 확인</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
+}
+
+function renderManualReversal(book, session, entryId, message = '') {
+  const { entry, expectedHash, reversal } = manualReversalPreview(book, session.sub, entryId);
+  const account = book.accounts().get(entry.sourceAccountId);
+  const amounts = entry.postings.filter(p => p.accountId === account.id).reduce((sum, p) =>
+    sum + p.amount * ((p.side === 'debit') === (account.type === 'asset') ? 1 : -1), 0);
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  const content = reversal ? `<p class="notice">이미 취소된 거래입니다. 취소 분개는 한 번만 기록됩니다.</p>
+    <p>취소일: ${escape(reversal.date)} · 취소자: ${escape(reversal.actor)} · 기록 시각: ${escape(reversal.createdAt)} (UTC)</p>
+    <p>사유: ${escape(reversal.reason)}</p>${reversal.detachedScheduleLink ? '<p>예정 거래의 실제 거래 연결을 해제했습니다.</p>' : ''}` : `<form method="post" action="/admin/transactions/reverse">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="entryId" value="${escape(entry.id)}">
+    <input type="hidden" name="expectedHash" value="${expectedHash}"><input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>취소일 (원거래일 이후)</label><input type="date" name="date" min="${escape(entry.date)}" value="${today < entry.date ? entry.date : today}" required>
+    <label>취소 사유</label><input name="reason" maxlength="200" required><button>반대 분개로 거래 취소</button></form>`;
+  return page('수동 거래 취소', `${message}<p>계좌: ${escape(account.name)} · 원거래일: ${escape(entry.date)} · 증감: ${amounts.toLocaleString('ko-KR')}원</p>
+    <p>메모: ${escape(entry.memo)}</p><p>원거래를 보존하고 취소일에 같은 금액의 반대 분개를 기록합니다. 예산도 취소일이 속한 달에 되돌립니다. 원거래일보다 이전 날짜나 계좌의 잠금 기간에는 취소할 수 없습니다.</p>
+    ${content}<p><a href="/admin/register?accountId=${encodeURIComponent(account.id)}">계좌 거래로 돌아가기</a></p>`);
 }
 
 function renderReviewOverview(book, session, query) {
@@ -955,6 +982,18 @@ export async function handleAdmin(book, auth, req, res, pathname) {
           Number(form.get('revision')), input), duplicate: false } : recordSplitManual(book, session.sub, input);
       sendHtml(res, 200, renderSplit(book, session, input.accountId, result.entry.id,
         `<p class="notice">${result.duplicate ? '이미 저장된' : '저장한'} 분할 거래입니다.</p>`));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/transactions/reverse') {
+      sendHtml(res, 200, renderManualReversal(book, session, new URL(req.url, 'http://localhost').searchParams.get('entryId')));
+      return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/transactions/reverse') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      reverseManualTransaction(book, session.sub, { entryId: form.get('entryId'), date: form.get('date'), reason: form.get('reason'),
+        expectedHash: form.get('expectedHash'), requestId: form.get('requestId') });
+      sendHtml(res, 200, renderManualReversal(book, session, form.get('entryId'), '<p class="notice">거래 취소를 기록했습니다.</p>'));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/accounts') {

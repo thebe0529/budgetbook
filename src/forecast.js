@@ -68,6 +68,9 @@ export function linkOccurrence(book, sub, { scheduleId, date, entryId }) {
   const schedule = listSchedules(book, sub).find(s => s.id === scheduleId);
   if (!schedule || !occurrence(schedule, date)) throw new Error('Unknown schedule occurrence');
   const entry = book.entries().find(e => e.id === entryId);
+  if (entry?.kind === 'manual-reversal' || book.db.prepare('SELECT 1 FROM transaction_reversals WHERE original_id = ?').get(entryId)) {
+    throw new Error('Reversed transaction cannot match a schedule');
+  }
   if (!entry || !matches(schedule, date, entry)) throw new Error('Actual cash movement does not match schedule');
   book.db.prepare(`INSERT INTO cash_schedule_links (schedule_id, occurrence_date, entry_id, linked_at)
     VALUES (?, ?, ?, ?)`).run(scheduleId, date, entryId, new Date().toISOString());
@@ -85,7 +88,8 @@ export function matchingEntries(book, sub, scheduleId, date) {
   const schedule = listSchedules(book, sub).find(s => s.id === scheduleId);
   if (!schedule || !occurrence(schedule, date)) throw new Error('Unknown schedule occurrence');
   const used = new Set(linkedOccurrences(book, sub).map(link => link.entry_id));
-  return book.entries().filter(entry => !used.has(entry.id) && matches(schedule, date, entry));
+  const reversed = new Set(book.db.prepare('SELECT original_id FROM transaction_reversals').all().map(row => row.original_id));
+  return book.entries().filter(entry => !used.has(entry.id) && !reversed.has(entry.id) && entry.kind !== 'manual-reversal' && matches(schedule, date, entry));
 }
 
 // Link only unambiguous matches; ambiguous or absent candidates remain for review.

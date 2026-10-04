@@ -195,6 +195,7 @@ function render() {
     li.textContent = `${row.date} ${row.memo || row.id} · ${Number(row.movement).toLocaleString('ko-KR')}원
       (잔액 ${Number(row.balance).toLocaleString('ko-KR')}원) `;
     if (row.locked) li.append(document.createTextNode('기간 잠금 · 수정 불가'));
+    if (row.reversalId) li.append(document.createTextNode('취소됨 · 원거래 보존'));
     if (row.split && !row.locked) {
       const edit = document.createElement('button');
       edit.type = 'button';

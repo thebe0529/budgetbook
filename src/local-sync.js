@@ -20,7 +20,7 @@ export function localSnapshot(book, sub) {
           const locked = entries.get(row.id).postings.some(p => locks.has(p.accountId) && row.date <= locks.get(p.accountId));
           const entry = !locked && row.kind === 'manual-split' && row.sourceAccountId === a.id ?
             editableManual(book, sub, row.id) : null;
-          return { id: row.id, date: row.date, memo: row.memo, movement: row.movement, locked,
+          return { id: row.id, date: row.date, memo: row.memo, movement: row.movement, locked, reversalId: row.reversalId,
             balance: row.balance, ...(entry ? { split: { revision: entry.revision,
               splitKind: entry.splitKind, lines: entry.postings.filter(p => p.accountId !== a.id)
                 .map((p, i) => ({ counterId: p.accountId, amount: p.amount,

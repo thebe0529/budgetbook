@@ -118,6 +118,8 @@ export function accountRegister(book, userSub, accountId, throughDate) {
   const checks = new Map(book.db.prepare('SELECT entry_id, entry_hash FROM account_entry_checks WHERE account_id = ?')
     .all(accountId).map(row => [row.entry_id, row.entry_hash]));
   const rows = [];
+  const reversals = new Map(book.db.prepare('SELECT original_id, reversal_id FROM transaction_reversals').all()
+    .map(row => [row.original_id, row.reversal_id]));
   for (const entry of book.entries()) {
     if (entry.date > throughDate) continue;
     const movement = entry.postings.filter(p => p.accountId === accountId)
@@ -128,7 +130,8 @@ export function accountRegister(book, userSub, accountId, throughDate) {
     if (checked) checkedBalance += movement;
     rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance,
       kind: entry.kind, sourceAccountId: entry.sourceAccountId, createdBy: entry.createdBy, checked,
-      confirmationHash: entryFingerprint(entry) });
+      confirmationHash: entryFingerprint(entry), reversalId: reversals.get(entry.id) ?? null,
+      reversesEntryId: entry.reversesEntryId ?? null });
   }
   return { account: { id: account.id, name: account.name, type: account.type },
     balance, checkedBalance, uncheckedCount: rows.filter(row => !row.checked).length, rows: rows.reverse() };

@@ -23,6 +23,14 @@ export class Book {
       CREATE INDEX IF NOT EXISTS statement_comparisons_account ON statement_comparisons(account_id, saved_at);
       CREATE TABLE IF NOT EXISTS statement_reviews (comparison_id TEXT PRIMARY KEY, actor TEXT NOT NULL,
         completed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS transaction_reversals (original_id TEXT PRIMARY KEY, reversal_id TEXT NOT NULL UNIQUE,
+        request_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS reversed_entry_update BEFORE UPDATE ON entries
+        WHEN EXISTS (SELECT 1 FROM transaction_reversals WHERE original_id = OLD.id OR reversal_id = OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'Reversed transactions cannot be changed'); END;
+      CREATE TRIGGER IF NOT EXISTS reversed_entry_delete BEFORE DELETE ON entries
+        WHEN EXISTS (SELECT 1 FROM transaction_reversals WHERE original_id = OLD.id OR reversal_id = OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'Reversed transactions cannot be changed'); END;
       CREATE TABLE IF NOT EXISTS account_period_locks (account_id TEXT PRIMARY KEY, through_date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_lock_events (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS locked_entry_insert BEFORE INSERT ON entries
