@@ -26,6 +26,7 @@ import { manualReversalPreview, reverseManualTransaction } from './manual-revers
 import { registerTransactionsCsv } from './register-export.js';
 import { transactionHistory } from './transaction-history.js';
 import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
+import { transactionCopyPreview } from './transaction-copy.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -130,6 +131,13 @@ function renderRegister(book, session, accountId, message = '', filters = regist
       (row.createdBy === session.sub || session.role === 'owner');
     let cancel = '';
     let manualEdit = '';
+    let copy = '';
+    if (['manual', 'manual-split'].includes(row.kind) && row.sourceAccountId === selected.id && !row.reversalId) {
+      try {
+        transactionCopyPreview(book, session.sub, row.id);
+        copy = `<a href="/admin/transactions/copy?entryId=${encodeURIComponent(row.id)}">복사</a>`;
+      } catch { /* Do not expose a draft without access to all financial accounts. */ }
+    }
     if (!locked && row.kind === 'manual' && row.sourceAccountId === selected.id) {
       try {
         manualEditPreview(book, session.sub, row.id);
@@ -145,6 +153,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     return `<tr><td>${writable && !row.checked ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 확인 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
       ${manualEdit}
+      ${copy}
       ${['manual', 'manual-split', 'manual-reversal'].includes(row.kind) ? `<a href="/admin/transactions/history?accountId=${encodeURIComponent(selected.id)}&amp;entryId=${encodeURIComponent(row.id)}">변경 이력</a>` : ''}
       ${row.reversalId ? ' · 취소됨 (원거래 보존)' : ''}${row.reversesEntryId ? ' · 취소 분개' : ''} ${cancel}</td>
     <td>${escape(row.movement.toLocaleString('ko-KR'))}</td><td>${escape(row.balance.toLocaleString('ko-KR'))}</td>
@@ -173,8 +182,9 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
 }
 
-function renderManualEdit(book, session, entryId) {
-  const { input, expectedHash } = manualEditPreview(book, session.sub, entryId);
+function renderManualEdit(book, session, entryId, copying = false) {
+  const { input, expectedHash } = copying ? transactionCopyPreview(book, session.sub, entryId) :
+    manualEditPreview(book, session.sub, entryId);
   const account = book.accounts().get(input.accountId);
   const counters = [...book.accounts().values()].filter(a => input.kind === 'expense' ? a.type === 'expense' :
     input.kind === 'income' ? a.type === 'income' : input.kind === 'opening' ? a.type === 'equity' :
@@ -182,17 +192,19 @@ function renderManualEdit(book, session, entryId) {
   const categoryOptions = [...book.budgetCategories().values()].map(c =>
     `<option value="${escape(c.id)}" ${c.id === input.categoryId ? 'selected' : ''}>${escape(c.name)}</option>`).join('');
   const kindNames = { expense: '지출', income: '수입', transfer: '이체·카드 결제', opening: '기초 잔액' };
-  return page('단순 거래 수정', `<p>원천 계좌: ${escape(account.name)} · 유형: ${kindNames[input.kind]}</p>
-    <p class="notice">수정 전 내용을 변경 이력에 보존합니다. 확인 완료 표시는 무효화되므로 다시 확인해야 합니다. 거래가 바뀌거나 관련 계좌 기간이 잠기면 저장할 수 없습니다. 원천 계좌와 거래 유형은 변경할 수 없습니다.</p>
-    <form method="post" action="/admin/transactions/update">
-    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="entryId" value="${escape(entryId)}">
+  return page(copying ? '단순 거래 복사' : '단순 거래 수정', `<p>원천 계좌: ${escape(account.name)} · 유형: ${kindNames[input.kind]}</p>
+    ${copying ? '<p class="notice">새 거래 초안입니다. 일자는 오늘(한국 시간)로 설정했습니다. 날짜·금액·상대 계정·예산·메모를 확인한 뒤 저장하세요. 원거래와 확인 상태는 보존되며 새 거래는 미확인으로 기록됩니다.</p>' :
+      '<p class="notice">수정 전 내용을 변경 이력에 보존합니다. 확인 완료 표시는 무효화되므로 다시 확인해야 합니다. 거래가 바뀌거나 관련 계좌 기간이 잠기면 저장할 수 없습니다. 원천 계좌와 거래 유형은 변경할 수 없습니다.</p>'}
+    <form method="post" action="${copying ? '/admin/transactions' : '/admin/transactions/update'}">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}">
+    ${copying ? `<input type="hidden" name="requestId" value="${randomUUID()}">` :
+      `<input type="hidden" name="entryId" value="${escape(entryId)}"><input type="hidden" name="expectedHash" value="${expectedHash}"><input type="hidden" name="updateRequestId" value="${randomUUID()}">`}
     <input type="hidden" name="accountId" value="${escape(input.accountId)}"><input type="hidden" name="kind" value="${input.kind}">
-    <input type="hidden" name="expectedHash" value="${expectedHash}"><input type="hidden" name="updateRequestId" value="${randomUUID()}">
     <label>일자</label><input type="date" name="date" value="${escape(input.date)}" required>
     <label>상대 계정</label><select name="counterId">${counters.map(a => `<option value="${escape(a.id)}" ${a.id === input.counterId ? 'selected' : ''}>${escape(a.name)}</option>`).join('')}</select>
     <label>금액 (사칙연산 가능)</label><input name="amountExpression" value="${escape(input.amountExpression)}" required>
     ${input.kind === 'expense' && account.onBudget ? `<label>예산 카테고리</label><select name="categoryId"><option value="">없음</option>${categoryOptions}</select>` : ''}
-    <label>메모</label><input name="memo" maxlength="500" value="${escape(input.memo)}"><button>거래 수정 저장</button></form>
+    <label>메모</label><input name="memo" maxlength="500" value="${escape(input.memo)}"><button>${copying ? '새 거래로 저장' : '거래 수정 저장'}</button></form>
     <p><a href="/admin/transactions/history?accountId=${encodeURIComponent(input.accountId)}&amp;entryId=${encodeURIComponent(entryId)}">변경 이력</a>
     · <a href="/admin/register?accountId=${encodeURIComponent(input.accountId)}">계좌 거래 목록으로</a></p>`);
 }
@@ -331,16 +343,19 @@ function renderBalanceCheck(book, session, query, message = '') {
     <h2>기간 잠금·해제 이력 (최근 20건)</h2><table><tr><th>작업</th><th>기준일</th><th>작업자</th><th>시각 (UTC)</th><th>해제 사유</th></tr>${lockHistory || '<tr><td colspan="5">잠금 이력이 없습니다.</td></tr>'}</table>`);
 }
 
-function renderSplit(book, session, accountId, entryId = null, message = '') {
+function renderSplit(book, session, accountId, entryId = null, message = '', copyEntryId = null) {
   const account = visibleAccounts(book, session.sub).find(a => a.id === accountId);
   if (!account || !canAccessAccount(book, session.sub, accountId, 'write')) {
     throw new Error('Account write access required');
   }
   const existing = entryId ? editableManual(book, session.sub, entryId) : null;
+  const copy = copyEntryId ? transactionCopyPreview(book, session.sub, copyEntryId) : null;
+  if (copy && (copy.entry.kind !== 'manual-split' || copy.input.accountId !== accountId)) throw new Error('Transaction cannot be copied');
+  const initial = existing ?? copy?.entry;
   if (entryId && (!existing || existing.sourceAccountId !== accountId)) {
     throw new Error('Split transaction cannot be edited');
   }
-  const kind = existing?.splitKind ?? 'expense';
+  const kind = initial?.splitKind ?? 'expense';
   const counters = [...book.accounts().values()].filter(a => ['income', 'expense'].includes(a.type) ||
     (['asset', 'liability'].includes(a.type) && a.id !== accountId &&
       canAccessAccount(book, session.sub, a.id, 'write')));
@@ -349,12 +364,13 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
     ${a.id === selected ? 'selected' : ''}>${escape(a.name)} (${a.type})</option>`).join('');
   const categoryOptions = selected => '<option value="">없음</option>' + categories.map(c =>
     `<option value="${escape(c.id)}" data-name="${escape(c.name)}" ${c.id === selected ? 'selected' : ''}>${escape(c.name)}</option>`).join('');
-  const counterLines = existing?.postings.filter(p => p.accountId !== accountId) ?? [null, null];
+  const counterLines = initial?.postings.filter(p => p.accountId !== accountId) ?? [null, null];
   const rows = counterLines.map((line, index) => `<tr><td><select name="counterId">${options(line?.accountId)}</select></td>
     <td><input name="lineAmount" value="${escape(line?.amount ?? '')}" required></td>
-    <td><select name="lineCategory">${categoryOptions(existing?.budgetAllocations?.[index]?.categoryId)}</select></td>
+    <td><select name="lineCategory">${categoryOptions(initial?.budgetAllocations?.[index]?.categoryId)}</select></td>
     <td><button type="button" data-remove-row>삭제</button></td></tr>`).join('');
-  return page(entryId ? '분할 거래 수정' : '분할 거래 입력', `${message}
+  return page(entryId ? '분할 거래 수정' : copy ? '분할 거래 복사' : '분할 거래 입력', `${message}
+    ${copy ? '<p class="notice">새 분할 거래 초안입니다. 일자는 오늘(한국 시간)로 설정했습니다. 날짜·메모·행을 확인한 뒤 저장하세요. 원거래와 확인 상태는 보존되며 새 거래는 미확인으로 기록됩니다.</p>' : ''}
     <p>원천 계좌: ${escape(account.name)} · 상대 계정을 행으로 추가합니다. 각 행의 합계를 원천 계좌에 한 번 반영합니다.</p>
     <p id="split-keyboard-help">Tab: 다음 입력칸 · Enter: 아래 행의 같은 입력칸 (마지막 행은 추가) · Shift+Enter: 위 행 · Ctrl+Enter 또는 ⌘+Enter: 저장. 최대 50행입니다.</p>
     <details><summary>엑셀 행 붙여넣기</summary>
@@ -368,14 +384,14 @@ function renderSplit(book, session, accountId, entryId = null, message = '') {
       ${entryId ? `<input type="hidden" name="entryId" value="${escape(entryId)}">
         <input type="hidden" name="revision" value="${existing.revision}">` :
     `<input type="hidden" name="requestId" value="${randomUUID()}">`}
-      <label>일자</label><input type="date" name="date" value="${escape(existing?.date ?? '')}" required>
+      <label>일자</label><input type="date" name="date" value="${escape(copy?.input.date ?? existing?.date ?? '')}" required>
       <label>유형</label><select name="kind"><option value="expense" ${kind === 'expense' ? 'selected' : ''}>지출</option>
       <option value="income" ${kind === 'income' ? 'selected' : ''}>수입</option>
       <option value="transfer" ${kind === 'transfer' ? 'selected' : ''}>이체·카드 결제</option></select>
-      <label>메모</label><input name="memo" value="${escape(existing?.memo ?? '')}">
+      <label>메모</label><input name="memo" value="${escape(initial?.memo ?? '')}">
       <table aria-describedby="split-keyboard-help"><tr><th>상대 계정</th><th>금액</th><th>예산 카테고리</th><th></th></tr>
       <tbody id="split-rows">${rows}</tbody></table><button type="button" id="add-split-row">행 추가</button>
-      <button>분할 거래 ${entryId ? '수정' : '저장'}</button>
+      <button>${copy ? '새 분할 거래로 저장' : `분할 거래 ${entryId ? '수정' : '저장'}`}</button>
     </form><template id="counter-template"><select name="counterId">${options()}</select></template>
     <template id="category-template"><select name="lineCategory">${categoryOptions()}</select></template>
     <script type="module" src="/admin/assets/split.js"></script>`);
@@ -1086,6 +1102,13 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/balance-check') {
       sendHtml(res, 200, renderBalanceCheck(book, session, new URL(req.url, 'http://localhost').searchParams));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/transactions/copy') {
+      const entryId = new URL(req.url, 'http://localhost').searchParams.get('entryId');
+      const copy = transactionCopyPreview(book, session.sub, entryId);
+      sendHtml(res, 200, copy.entry.kind === 'manual-split' ?
+        renderSplit(book, session, copy.input.accountId, null, '', entryId) : renderManualEdit(book, session, entryId, true));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/transactions/edit') {
