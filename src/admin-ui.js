@@ -14,7 +14,7 @@ import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccur
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
 import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
-import { monthlyComparison, monthlyComparisonCsv } from './monthly-comparison.js';
+import { monthlyComparison, monthlyComparisonCsv, monthlyComparisonOptions } from './monthly-comparison.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
@@ -455,7 +455,7 @@ function renderReports(book, session, fromDate, throughDate, message = '') {
     const activityLabels = { operating: '영업활동', investing: '투자활동', financing: '재무활동' };
     const activityRows = Object.entries(detail.cashFlowActivities.totals).map(([key, value]) =>
       `<tr><td>${activityLabels[key]}</td><td>${money(value)}</td></tr>`).join('');
-    consolidated = `<p><a href="/admin/reports/monthly?month=${encodeURIComponent(throughDate.slice(0, 7))}">전월 대비 월별 수입·지출 비교</a></p><h2>재무상태표 · ${escape(throughDate)}</h2>
+    consolidated = `<p><a href="/admin/reports/monthly?month=${encodeURIComponent(throughDate.slice(0, 7))}">월별 수입·지출 비교</a></p><h2>재무상태표 · ${escape(throughDate)}</h2>
       <table><tr><th>유형</th><th>계좌 그룹</th><th>계정</th><th>잔액</th></tr>${positionRows}</table>
       <p>자산 ${money(bs.assets)}원 · 부채 ${money(bs.liabilities)}원 · 순자산 ${money(bs.netWorth)}원<br>
       기초자본 ${money(bs.equity)}원 + 누적 손익 ${money(bs.retainedResult)}원 = 순자산 ${money(bs.netWorth)}원</p>
@@ -480,11 +480,12 @@ function renderReports(book, session, fromDate, throughDate, message = '') {
     <h2>접근 가능한 계좌 잔액</h2><table><tr><th>계좌</th><th>잔액</th></tr>${rows}</table>${consolidated}`);
 }
 
-function renderMonthlyComparison(book, session, month) {
-  const report = monthlyComparison(book, session.sub, month);
+function renderMonthlyComparison(book, session, month, options) {
+  const report = monthlyComparison(book, session.sub, month, options);
+  const csvQuery = new URLSearchParams({ month, comparison: report.comparison, referenceMonth: report.previousPeriod.month });
   const labels = { income: '수입', expenses: '지출', result: '순손익', expense: '지출' };
   const money = value => escape(value.toLocaleString('ko-KR'));
-  const rate = value => value === null ? '— (전월 0원)' : `${money(Number(value.toFixed(2)))}%`;
+  const rate = value => value === null ? '— (비교 월 0원)' : `${money(Number(value.toFixed(2)))}%`;
   const link = (item, period, amount) => `<a href="/admin/reports/account?${escape(new URLSearchParams({ accountId: item.id,
     fromDate: period.fromDate, throughDate: period.throughDate }).toString())}">${money(amount)}</a>`;
   const summaryRows = report.totals.map(item => `<tr><td>${labels[item.key]}</td><td>${money(item.previous)}</td>
@@ -492,14 +493,16 @@ function renderMonthlyComparison(book, session, month) {
   const accountRows = report.rows.map(item => `<tr><td>${labels[item.type]}</td><td>${escape(item.name)}</td>
     <td>${link(item, report.previousPeriod, item.previous)}</td><td>${link(item, report.currentPeriod, item.current)}</td>
     <td>${money(item.delta)}</td><td>${rate(item.percent)}</td></tr>`).join('');
-  return page('전월 대비 수입·지출', `<p><a href="/admin/reports">보고서로</a></p>
-    <form method="get" action="/admin/reports/monthly"><label>조회 월</label><input type="month" name="month" min="0001-02" max="9999-12" value="${escape(month)}" required><button>비교</button></form>
-    <p>전월 ${escape(report.previousPeriod.fromDate)} ~ ${escape(report.previousPeriod.throughDate)} · 조회 월 ${escape(report.currentPeriod.fromDate)} ~ ${escape(report.currentPeriod.throughDate)}</p>
+  return page('월별 수입·지출 비교', `<p><a href="/admin/reports">보고서로</a></p>
+    <form method="get" action="/admin/reports/monthly"><label>조회 월</label><input type="month" name="month" min="0001-01" max="9999-12" value="${escape(month)}" required>
+    <label>비교 기준</label><select name="comparison">${monthlyComparisonOptions.map(([value, label]) => `<option value="${value}"${report.comparison === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
+    <label>직접 지정할 비교 월 (직접 지정 선택 시 적용)</label><input type="month" name="referenceMonth" min="0001-01" max="9999-12" value="${escape(report.previousPeriod.month)}"><button>비교</button></form>
+    <p>비교 월 ${escape(report.previousPeriod.fromDate)} ~ ${escape(report.previousPeriod.throughDate)} · 조회 월 ${escape(report.currentPeriod.fromDate)} ~ ${escape(report.currentPeriod.throughDate)}</p>
     <p>각 월 전체에 등록된 분개를 비교합니다. 진행 중인 월은 아직 입력되지 않은 거래가 있고 미래 일자로 입력한 거래도 포함될 수 있습니다. 계좌 이체·카드 대금 결제는 수입·지출에서 제외하며 카드 사용액은 사용일에 반영합니다. 취소·환급 분개는 기록된 월에 음수로 반영합니다.</p>
-    <p>증감 = 조회 월 − 전월. 증감률 = 증감 ÷ 전월 금액의 절댓값 × 100이며, 전월 0원에서 금액이 발생하면 증감률을 계산하지 않습니다. 지출 증가는 비용 증가를 뜻하며 순손익은 수입 − 지출입니다.</p>
+    <p>증감 = 조회 월 − 비교 월. 증감률 = 증감 ÷ 비교 월 금액의 절댓값 × 100이며, 비교 월 0원에서 금액이 발생하면 증감률을 계산하지 않습니다. 지출 증가는 비용 증가를 뜻하며 순손익은 수입 − 지출입니다.</p>
     <h2>월별 합계</h2><div class="table-scroll"><table><tr><th>구분</th><th>${escape(report.previousPeriod.month)} (원)</th><th>${escape(month)} (원)</th><th>증감(원)</th><th>증감률</th></tr>${summaryRows}</table></div>
-    <h2>계정별 비교</h2><p>월별 금액을 누르면 해당 월의 원거래를 조회합니다.</p><div class="table-scroll"><table><tr><th>유형</th><th>계정</th><th>전월(원)</th><th>조회 월(원)</th><th>증감(원)</th><th>증감률</th></tr>${accountRows}</table></div>
-    <p><a href="/admin/reports/monthly.csv?month=${encodeURIComponent(month)}">월별 비교 CSV 다운로드</a></p>`);
+    <h2>계정별 비교</h2><p>월별 금액을 누르면 해당 월의 원거래를 조회합니다.</p><div class="table-scroll"><table><tr><th>유형</th><th>계정</th><th>비교 월(원)</th><th>조회 월(원)</th><th>증감(원)</th><th>증감률</th></tr>${accountRows}</table></div>
+    <p><a href="/admin/reports/monthly.csv?${escape(csvQuery.toString())}">월별 비교 CSV 다운로드</a></p>`);
 }
 
 function renderAccountActivity(book, session, accountId, fromDate, throughDate) {
@@ -1268,13 +1271,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && ['/admin/reports/monthly', '/admin/reports/monthly.csv'].includes(pathname)) {
       const query = new URL(req.url, 'http://localhost').searchParams;
       const month = query.get('month') || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' }).slice(0, 7);
+      const options = { comparison: query.get('comparison') || 'previous', referenceMonth: query.get('referenceMonth') };
       if (pathname.endsWith('.csv')) {
-        const csv = monthlyComparisonCsv(book, session.sub, month);
+        const csv = monthlyComparisonCsv(book, session.sub, month, options);
         res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': `attachment; filename="budgetbook-monthly-${month}.csv"`,
           'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
         res.end(csv);
-      } else sendHtml(res, 200, renderMonthlyComparison(book, session, month));
+      } else sendHtml(res, 200, renderMonthlyComparison(book, session, month, options));
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/reports/cash.csv') {

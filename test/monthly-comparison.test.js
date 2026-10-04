@@ -89,6 +89,67 @@ test('monthly CSV exports numeric differences and empty undefined rates with spr
   } finally { book.close(); }
 });
 
+test('year and custom reference modes select exact full months and reconcile shared account comparisons', () => {
+  const book = setup();
+  try {
+    create(book, '2023-02-28', 100); create(book, '2023-03-01', 9000);
+    create(book, '2024-01-31', 500); create(book, '2024-02-29', 300);
+    const yearly = monthlyComparison(book, 'owner', '2024-02', { comparison: 'year' });
+    assert.equal(yearly.comparison, 'year'); assert.deepEqual(yearly.previousPeriod,
+      { month: '2023-02', fromDate: '2023-02-01', throughDate: '2023-02-28' });
+    assert.equal(yearly.currentPeriod.throughDate, '2024-02-29');
+    assert.deepEqual(yearly.totals[1], { key: 'expenses', previous: 100, current: 300, delta: 200, percent: 200 });
+    const custom = monthlyComparison(book, 'owner', '2024-02', { comparison: 'custom', referenceMonth: '2024-01' });
+    const previous = monthlyComparison(book, 'owner', '2024-02');
+    assert.deepEqual(custom.rows, previous.rows); assert.deepEqual(custom.totals, previous.totals);
+    assert.equal(custom.totals[1].delta, -200);
+    assert.equal(monthlyComparison(book, 'owner', '0001-01', { comparison: 'custom', referenceMonth: '9999-12' }).previousPeriod.throughDate, '9999-12-31');
+    assert.equal(monthlyComparison(book, 'owner', '0100-02', { comparison: 'year' }).previousPeriod.month, '0099-02');
+    const csv = monthlyComparisonCsv(book, 'owner', '2024-02', { comparison: 'year' });
+    assert.match(csv, /비교 월/); assert.ok(csv.includes('"2023-02","2024-02",100,300,200,200'));
+  } finally { book.close(); }
+});
+
+test('reference modes reject unsupported, missing, identical and out-of-range months before returning data', () => {
+  const book = setup();
+  try {
+    for (const options of [{ comparison: 'unknown' }, { comparison: 'custom' },
+      { comparison: 'custom', referenceMonth: '' }, { comparison: 'custom', referenceMonth: '0000-01' },
+      { comparison: 'custom', referenceMonth: '2026-10' }, { comparison: 'custom', referenceMonth: '2026-13' },
+      { comparison: 'custom', referenceMonth: '2026-1' }, { comparison: 'custom', referenceMonth: '<bad>' }]) {
+      assert.throws(() => monthlyComparison(book, 'owner', '2026-10', options));
+      assert.throws(() => monthlyComparisonCsv(book, 'owner', '2026-10', options));
+    }
+    assert.throws(() => monthlyComparison(book, 'owner', '0001-12', { comparison: 'year' }), /supported year/);
+    assert.throws(() => monthlyComparison(book, 'viewer', '2026-10', { comparison: 'year' }), /Owner/);
+    assert.throws(() => monthlyComparisonCsv(book, 'viewer', '2026-10', { comparison: 'custom', referenceMonth: '2025-10' }), /Owner/);
+  } finally { book.close(); }
+});
+
+test('HTTP comparison selection persists in controls, drilldowns and matching CSV downloads', async () => {
+  const book = setup(); create(book, '2025-10-31', 100); create(book, '2026-06-30', 200); create(book, '2026-10-01', 300);
+  let sub = 'owner';
+  const server = createImportApi(book, { auth: { session: () => ({ sub, role: sub, csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/reports`;
+  try {
+    for (const options of [{ comparison: 'year', referenceMonth: '2025-10' }, { comparison: 'custom', referenceMonth: '2026-06' }]) {
+      const query = new URLSearchParams({ month: '2026-10', ...options });
+      const response = await fetch(`${base}/monthly?${query}`); assert.equal(response.status, 200);
+      const html = await response.text(); assert.ok(html.includes(`value="${options.comparison}" selected`));
+      assert.ok(html.includes(`value="${options.referenceMonth}"`)); assert.ok(html.includes(`fromDate=${options.referenceMonth}-01`));
+      const download = html.match(/href="([^\"]*\/monthly.csv\?[^\"]*)"/)[1].replaceAll('&amp;', '&');
+      const csv = await fetch(new URL(download, base)); assert.equal(csv.status, 200);
+      assert.equal((await csv.text()).replace(/^\uFEFF/, ''), monthlyComparisonCsv(book, 'owner', '2026-10', options).replace(/^\uFEFF/, ''));
+    }
+    for (const query of ['comparison=unknown', 'comparison=custom', 'comparison=custom&referenceMonth=2026-10']) {
+      for (const suffix of ['', '.csv']) assert.equal((await fetch(`${base}/monthly${suffix}?month=2026-10&${query}`)).status, 400);
+    }
+    sub = 'viewer';
+    assert.equal((await fetch(`${base}/monthly.csv?month=2026-10&comparison=year`)).status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
 test('HTTP monthly report and CSV enforce owner access and provide escaped account drilldowns', async () => {
   const book = setup(); create(book, '2026-09-01', 100); create(book, '2026-10-01', 200);
   let sub = 'owner';
