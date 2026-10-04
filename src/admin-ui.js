@@ -14,7 +14,7 @@ import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccur
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
 import { accountActivity, detailedReports } from './report-details.js';
 import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
-import { monthlyComparison, monthlyComparisonCsv, monthlyComparisonOptions, monthlyAccountTypes, monthlyComparisonFilters } from './monthly-comparison.js';
+import { monthlyComparison, monthlyComparisonCsv, monthlyComparisonOptions, monthlyAccountTypes, monthlyComparisonFilters, monthlySortOptions } from './monthly-comparison.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
@@ -499,12 +499,15 @@ function renderMonthlyComparison(book, session, month, options) {
     <label>직접 지정할 비교 월 (직접 지정 선택 시 적용)</label><input type="month" name="referenceMonth" min="0001-01" max="9999-12" value="${escape(report.previousPeriod.month)}">
     <label>계정 유형</label><select name="accountType">${monthlyAccountTypes.map(([value, label]) => `<option value="${value}"${report.filters.accountType === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
     <label>계정명 검색</label><input name="accountQuery" maxlength="100" value="${escape(report.filters.accountQuery)}">
+    <label>계정 정렬</label><select name="sort">${monthlySortOptions.map(([value, label]) => `<option value="${value}"${report.filters.sort === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
     <label><input type="checkbox" name="hideZero" value="true"${report.filters.hideZero ? ' checked' : ''} style="width:auto">양쪽 월 금액이 모두 0원인 계정 숨기기</label><button>비교</button></form>
     <p>비교 월 ${escape(report.previousPeriod.fromDate)} ~ ${escape(report.previousPeriod.throughDate)} · 조회 월 ${escape(report.currentPeriod.fromDate)} ~ ${escape(report.currentPeriod.throughDate)}</p>
     <p>각 월 전체에 등록된 분개를 비교합니다. 진행 중인 월은 아직 입력되지 않은 거래가 있고 미래 일자로 입력한 거래도 포함될 수 있습니다. 계좌 이체·카드 대금 결제는 수입·지출에서 제외하며 카드 사용액은 사용일에 반영합니다. 취소·환급 분개는 기록된 월에 음수로 반영합니다.</p>
     <p>증감 = 조회 월 − 비교 월. 증감률 = 증감 ÷ 비교 월 금액의 절댓값 × 100이며, 비교 월 0원에서 금액이 발생하면 증감률을 계산하지 않습니다. 지출 증가는 비용 증가를 뜻하며 순손익은 수입 − 지출입니다.</p>
     <h2>월별 전체 합계</h2><p>계정 유형·계정명·0원 제외 조건은 아래 계정 목록에만 적용합니다. 전체 수입·지출·순손익 합계는 유지하며 CSV에서도 전체 합계로 표시합니다.</p><div class="table-scroll"><table><tr><th>구분</th><th>${escape(report.previousPeriod.month)} (원)</th><th>${escape(month)} (원)</th><th>증감(원)</th><th>증감률</th></tr>${summaryRows}</table></div>
-    <h2>계정별 비교</h2><p>전체 ${report.totalAccounts}개 중 ${report.rows.length}개 계정 표시 · 월별 금액을 누르면 해당 월의 원거래를 조회합니다.</p><div class="table-scroll"><table><tr><th>유형</th><th>계정</th><th>비교 월(원)</th><th>조회 월(원)</th><th>증감(원)</th><th>증감률</th></tr>${accountRows || '<tr><td colspan="6">조건에 맞는 계정이 없습니다.</td></tr>'}</table></div>
+    <h2>계정별 비교</h2><p>전체 ${report.totalAccounts}개 중 ${report.rows.length}개 계정 표시 · 월별 금액을 누르면 해당 월의 원거래를 조회합니다.</p>
+    <p>금액·증감액·증감률은 부호를 포함한 값으로 정렬합니다. 증감률을 계산할 수 없는 계정은 큰순·작은순 모두 마지막에 표시하며 같은 값은 기존 계정순을 유지합니다. 증감률 정렬은 반올림 전 값을 기준으로 합니다.</p>
+    <div class="table-scroll"><table><tr><th>유형</th><th>계정</th><th>비교 월(원)</th><th>조회 월(원)</th><th>증감(원)</th><th>증감률</th></tr>${accountRows || '<tr><td colspan="6">조건에 맞는 계정이 없습니다.</td></tr>'}</table></div>
     <p><a href="/admin/reports/monthly.csv?${escape(csvQuery.toString())}">월별 비교 CSV 다운로드</a></p>`);
 }
 

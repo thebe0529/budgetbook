@@ -189,6 +189,76 @@ test('HTTP account filters persist with custom periods and CSV while empty resul
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
 
+test('every monthly account sort preserves totals, stable ties and undefined rates without mutating the ledger', () => {
+  const book = setup();
+  try {
+    for (const [id, name, previous, current] of [['a', '항목10', 100, 200], ['b', '항목2', 100, 50],
+      ['c', '항목3', 0, 300], ['d', '항목4', 50, 100], ['e', '항목5', 100, 200]]) {
+      book.createAccount({ id, name, type: 'expense' });
+      if (previous) create(book, '2026-09-01', previous, { counterId: id });
+      create(book, '2026-10-01', current, { counterId: id });
+    }
+    const before = book.entries(); const original = monthlyComparison(book, 'owner', '2026-10', { accountQuery: '항목' });
+    const expected = { original: ['a', 'b', 'c', 'd', 'e'], 'name-asc': ['b', 'c', 'd', 'e', 'a'], 'name-desc': ['a', 'e', 'd', 'c', 'b'],
+      'previous-asc': ['c', 'd', 'a', 'b', 'e'], 'previous-desc': ['a', 'b', 'e', 'd', 'c'],
+      'current-asc': ['b', 'd', 'a', 'e', 'c'], 'current-desc': ['c', 'a', 'e', 'd', 'b'],
+      'delta-asc': ['b', 'd', 'a', 'e', 'c'], 'delta-desc': ['c', 'a', 'e', 'd', 'b'],
+      'percent-asc': ['b', 'a', 'd', 'e', 'c'], 'percent-desc': ['a', 'd', 'e', 'b', 'c'] };
+    for (const [sort, ids] of Object.entries(expected)) {
+      const report = monthlyComparison(book, 'owner', '2026-10', { accountQuery: '항목', sort });
+      assert.deepEqual(report.rows.map(row => row.id), ids); assert.deepEqual(report.totals, original.totals);
+      const csv = monthlyComparisonCsv(book, 'owner', '2026-10', { accountQuery: '항목', sort });
+      assert.match(csv, /계정 정렬 조건/);
+      const positions = report.rows.map(row => csv.indexOf(`"${row.name}"`));
+      assert.ok(positions.every((value, index) => !index || value > positions[index - 1]));
+    }
+    assert.deepEqual(book.entries(), before);
+    assert.deepEqual(monthlyComparison(book, 'owner', '2026-10', { accountQuery: '항목' }).rows, original.rows);
+    for (const sort of ['amount', 'delta', 'date-asc', null]) assert.throws(() => monthlyComparison(book, 'owner', '2026-10', { sort }), /account sort/);
+  } finally { book.close(); }
+});
+
+test('monthly sorts use signed amounts and unrounded percentages rather than displayed values', () => {
+  const book = setup();
+  try {
+    for (const [id, amount] of [['negative', -100], ['positive', 20]]) {
+      book.createAccount({ id, name: `부호 ${id}`, type: 'expense' });
+      book.record({ id, date: '2026-10-01', postings: [
+        { accountId: id, side: amount < 0 ? 'credit' : 'debit', amount: Math.abs(amount) },
+        { accountId: 'bank', side: amount < 0 ? 'debit' : 'credit', amount: Math.abs(amount) }] });
+    }
+    assert.deepEqual(monthlyComparison(book, 'owner', '2026-10', { accountQuery: '부호', sort: 'current-desc' }).rows.map(row => row.id), ['positive', 'negative']);
+    for (const [id, amount] of [['q', 4000000], ['p', 3000000]]) {
+      book.createAccount({ id, name: `소수 ${id}`, type: 'expense' });
+      create(book, '2026-09-01', amount, { counterId: id }); create(book, '2026-10-01', amount + 1, { counterId: id });
+    }
+    const asc = monthlyComparison(book, 'owner', '2026-10', { accountQuery: '소수', sort: 'percent-asc' });
+    const desc = monthlyComparison(book, 'owner', '2026-10', { accountQuery: '소수', sort: 'percent-desc' });
+    assert.ok(desc.rows.every(row => row.percent.toFixed(2) === '0.00'));
+    assert.deepEqual(asc.rows.map(row => row.id), ['q', 'p']); assert.deepEqual(desc.rows.map(row => row.id), ['p', 'q']);
+  } finally { book.close(); }
+});
+
+test('HTTP monthly sort is retained with custom reference and filters in an identical CSV row order', async () => {
+  const book = setup(); create(book, '2026-06-01', 100); create(book, '2026-10-01', 300);
+  book.createAccount({ id: 'second', name: '비용2', type: 'expense' });
+  create(book, '2026-06-01', 200, { counterId: 'second' }); create(book, '2026-10-01', 100, { counterId: 'second' });
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'owner', role: 'owner', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/reports`;
+  try {
+    const params = new URLSearchParams({ month: '2026-10', comparison: 'custom', referenceMonth: '2026-06', accountType: 'expense', hideZero: 'true', sort: 'delta-desc' });
+    const html = await (await fetch(`${base}/monthly?${params}`)).text();
+    assert.match(html, /value="delta-desc" selected/); assert.match(html, /value="custom" selected/); assert.match(html, /name="hideZero" value="true" checked/);
+    assert.ok(html.indexOf('&lt;식비 &amp; 생활&gt;') < html.indexOf('비용2'));
+    const download = html.match(/href="([^\"]*\/monthly.csv\?[^\"]*)"/)[1].replaceAll('&amp;', '&');
+    assert.ok(download.includes('sort=delta-desc'));
+    const response = await fetch(new URL(download, base)); assert.equal(response.status, 200);
+    assert.equal((await response.text()).replace(/^\uFEFF/, ''), monthlyComparisonCsv(book, 'owner', '2026-10', monthlyComparisonFilters(params)).replace(/^\uFEFF/, ''));
+    for (const suffix of ['', '.csv']) assert.equal((await fetch(`${base}/monthly${suffix}?month=2026-10&sort=unknown`)).status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
 test('HTTP comparison selection persists in controls, drilldowns and matching CSV downloads', async () => {
   const book = setup(); create(book, '2025-10-31', 100); create(book, '2026-06-30', 200); create(book, '2026-10-01', 300);
   let sub = 'owner';
