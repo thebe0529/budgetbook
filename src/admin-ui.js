@@ -28,7 +28,7 @@ import { transactionHistory } from './transaction-history.js';
 import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
 import { transactionCopyPreview } from './transaction-copy.js';
 import { updateSelectedMemos, updateSelectedCategories } from './bulk-memo.js';
-import { tagEditPreview, updateTransactionTags } from './transaction-tags.js';
+import { tagEditPreview, updateTransactionTags, updateSelectedTags } from './transaction-tags.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -157,7 +157,7 @@ function renderRegister(book, session, accountId, message = '', filters = regist
         cancel = `<a href="/admin/transactions/reverse?entryId=${encodeURIComponent(row.id)}">${row.reversalId ? '취소 이력' : '거래 취소'}</a>`;
       } catch { /* No cancellation control without rights to every affected account. */ }
     }
-    return `<tr><td>${writable && !locked && (!row.checked || ['manual', 'manual-split'].includes(row.kind) && !row.reversalId) ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 거래 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
+    return `<tr><td>${writable && (tagEdit || !locked && (!row.checked || ['manual', 'manual-split'].includes(row.kind) && !row.reversalId)) ? `<input type="checkbox" name="selection" form="confirm-selected" aria-label="${escape(row.date)} ${escape(row.memo)} 거래 선택" value="${escape(JSON.stringify({ entryId: row.id, expectedHash: row.confirmationHash, tagsHash: row.tagsHash }))}">` : ''}</td><td>${escape(row.date)}</td><td>${escape(row.memo)}
       ${editable ? `<a href="/admin/split/edit?entryId=${encodeURIComponent(row.id)}">수정</a>` : ''}
       ${manualEdit}
       ${copy}
@@ -196,7 +196,11 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <button formaction="/admin/register/memo-selected">선택 거래 메모 변경</button>
     <p>예산 카테고리 변경은 예산에 포함된 계좌의 수동 지출만 선택하세요. 분할 지출의 모든 행에 같은 카테고리를 적용합니다. 금액·날짜·메모는 유지하고 원래 거래 월의 예산을 다시 계산하며 확인 표시는 무효화합니다. 한 건이라도 실패하면 전체 변경을 취소합니다.</p>
     <label>선택 지출의 새 예산 카테고리</label><select name="newCategoryId"><option value="">없음 (예산 배분 해제)</option>${categories}</select>
-    <button formaction="/admin/register/category-selected">선택 지출 예산 변경</button></form>` : ''}
+    <button formaction="/admin/register/category-selected">선택 지출 예산 변경</button>
+    <p>태그 변경은 수정 권한이 있는 수동 단순·분할 거래만 선택하세요. 추가는 기존 태그를 유지하고, 제거는 입력한 태그만 지우며, 교체는 기존 태그를 모두 바꿉니다. 교체에서 빈 값은 모든 태그를 지웁니다. 잠긴 거래도 태그만 변경할 수 있으며 금액·예산·확인 상태는 유지합니다. 한 건이라도 충돌·권한·태그 개수 문제가 있으면 전체 변경을 취소합니다.</p>
+    <label>태그 변경 방식</label><select name="tagMode"><option value="add">추가</option><option value="remove">제거</option><option value="replace">교체 (빈 값은 모두 지우기)</option></select>
+    <label>선택 거래의 태그 (쉼표 구분)</label><input name="newTags" maxlength="500">
+    <button formaction="/admin/register/tags-selected">선택 거래 태그 변경</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
 }
 
@@ -1184,6 +1188,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const result = updateTransactionTags(book, session.sub, Object.fromEntries(form));
       sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
         `<p class="notice">${result.duplicate ? '이미 처리한 태그 변경 요청입니다.' : '태그를 저장했습니다.'}</p>`, filters)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/register/tags-selected') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const filters = registerFilters(form);
+      const result = updateSelectedTags(book, session.sub, { accountId: form.get('accountId'), mode: form.get('tagMode'),
+        tags: form.get('newTags'), requestId: form.get('requestId'), selections: form.getAll('selection').map(value => JSON.parse(value)) });
+      sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
+        `<p class="notice">${result.duplicate ? '이미 처리한 태그 변경 요청입니다.' : `선택 ${result.count}건 중 ${result.changed}건의 태그를 변경했습니다.`}</p>`, filters)); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/register/category-selected') {
       const form = await formBody(req);

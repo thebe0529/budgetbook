@@ -3,6 +3,7 @@ import { assertDate, validateEntry } from './ledger.js';
 import { calculateAmount } from './amount-expression.js';
 import { canAccessAccount, member, visibleAccounts } from './members.js';
 import { entryFingerprint } from './transaction-checks.js';
+import { tagsFingerprint } from './transaction-tags.js';
 
 export function createGroup(book, userSub, name, type) {
   if (member(book, userSub)?.role !== 'owner') throw new Error('Owner access required');
@@ -142,7 +143,7 @@ export function accountRegister(book, userSub, accountId, throughDate) {
     const checked = checks.get(entry.id) === entryFingerprint(entry);
     if (checked) checkedBalance += movement;
     const tags = tagRows.get(entry.id) ?? [];
-    rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance, tags,
+    rows.push({ id: entry.id, date: entry.date, memo: entry.memo ?? '', movement, balance, tags, tagsHash: tagsFingerprint(tags),
       kind: entry.kind, sourceAccountId: entry.sourceAccountId, createdBy: entry.createdBy, checked,
       confirmationHash: entryFingerprint(entry), reversalId: reversals.get(entry.id) ?? null,
       reversesEntryId: entry.reversesEntryId ?? null });
