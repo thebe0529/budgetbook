@@ -27,7 +27,7 @@ import { registerTransactionsCsv } from './register-export.js';
 import { transactionHistory } from './transaction-history.js';
 import { manualEditPreview, updateManualTransaction } from './manual-edit.js';
 import { transactionCopyPreview } from './transaction-copy.js';
-import { updateSelectedMemos } from './bulk-memo.js';
+import { updateSelectedMemos, updateSelectedCategories } from './bulk-memo.js';
 import { listAdjustments, recordAdjustment, reverseAdjustment } from './adjustments.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char =>
@@ -185,7 +185,10 @@ function renderRegister(book, session, accountId, message = '', filters = regist
     <p>메모 변경은 수정 권한이 있는 수동 단순·분할 거래만 선택하세요. 금액·날짜·예산은 유지하고 확인 표시는 다시 확인해야 합니다. 한 건이라도 변경·취소·잠금·권한 문제가 있으면 전체 변경을 취소합니다.</p>
     <input type="hidden" name="requestId" value="${randomUUID()}">
     <label>선택 거래의 새 메모 (빈 값은 메모 지우기)</label><textarea name="newMemo" maxlength="500" rows="2"></textarea>
-    <button formaction="/admin/register/memo-selected">선택 거래 메모 변경</button></form>` : ''}
+    <button formaction="/admin/register/memo-selected">선택 거래 메모 변경</button>
+    <p>예산 카테고리 변경은 예산에 포함된 계좌의 수동 지출만 선택하세요. 분할 지출의 모든 행에 같은 카테고리를 적용합니다. 금액·날짜·메모는 유지하고 원래 거래 월의 예산을 다시 계산하며 확인 표시는 무효화합니다. 한 건이라도 실패하면 전체 변경을 취소합니다.</p>
+    <label>선택 지출의 새 예산 카테고리</label><select name="newCategoryId"><option value="">없음 (예산 배분 해제)</option>${categories}</select>
+    <button formaction="/admin/register/category-selected">선택 지출 예산 변경</button></form>` : ''}
     <table><tr><th>선택</th><th>일자</th><th>메모</th><th>증감</th><th>잔액</th><th>확인 상태</th></tr>${rows}</table>${navigation}`);
 }
 
@@ -1149,6 +1152,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && pathname === '/admin/register') {
       const query = new URL(req.url, 'http://localhost').searchParams;
       sendHtml(res, 200, renderRegister(book, session, query.get('accountId'), '', registerFilters(query))); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/register/category-selected') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const result = updateSelectedCategories(book, session.sub, { accountId: form.get('accountId'),
+        requestId: form.get('requestId'), categoryId: form.get('newCategoryId'), selections: form.getAll('selection').map(value => JSON.parse(value)) });
+      sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
+        `<p class="notice">${result.duplicate ? '이미 처리한 예산 변경 요청입니다.' : `${result.count}건의 예산 카테고리를 변경했습니다. 변경 이력을 확인하고 거래를 다시 확인하세요.`}</p>`, registerFilters(form)));
+      return true;
     }
     if (req.method === 'POST' && pathname === '/admin/register/memo-selected') {
       const form = await formBody(req);

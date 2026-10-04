@@ -114,6 +114,8 @@ export class Book {
         request_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, actor_sub TEXT NOT NULL,
         payload_hash TEXT NOT NULL, applied_revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS bulk_memo_requests (
+        request_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS bulk_category_requests (
         request_id TEXT PRIMARY KEY, data TEXT NOT NULL);`);
   }
 
