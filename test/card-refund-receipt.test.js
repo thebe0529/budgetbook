@@ -9,11 +9,15 @@ import { ensureOwner, setMember } from '../src/members.js';
 import { recordCardPurchase, recordCardPayment } from '../src/card-manual.js';
 import { cardCancellationPreview, cancelCardPurchase } from '../src/card-cancellation.js';
 import { refundPaidCardPurchase } from '../src/card-refund.js';
-import { cardRefundReceiptPreview, recordCardRefundReceipt } from '../src/card-refund-receipt.js';
+import { cardRefundReceiptPreview, recordCardRefundReceipt, cardRefundReceiptCandidates, linkCardRefundReceipt } from '../src/card-refund-receipt.js';
+import { entryFingerprint } from '../src/transaction-checks.js';
+import { manualReversalPreview } from '../src/manual-reversal.js';
+import { manualEditPreview } from '../src/manual-edit.js';
+import { recordAdjustment, reverseAdjustment } from '../src/adjustments.js';
 import { forecast } from '../src/forecast.js';
 import { createImportApi } from '../src/import-api.js';
 
-function fixture(filename) {
+function fixture(filename, refundAmount = '12000') {
   const book = new Book(filename); ensureOwner(book, 'owner');
   book.createAccount({ id: 'card', name: '카드', type: 'liability', card: true, onBudget: true });
   book.createAccount({ id: 'cash', name: '비공개 환급은행', type: 'asset', cash: true });
@@ -26,7 +30,7 @@ function fixture(filename) {
   const plan = recordCardPurchase(book, 'editor', { requestId: randomUUID(), date: '2026-10-10', cardId: 'card', expenseId: 'expense',
     amountExpression: '12000', count: '1', firstDueDate: '2026-11-25', categoryId: 'food' }).plan;
   recordCardPayment(book, 'editor', { planId: plan.id, index: 1, date: '2026-11-25', cashId: 'cash' });
-  const refund = { requestId: randomUUID(), planId: plan.id, date: '2026-12-01', reason: '반품', amountExpression: '12000',
+  const refund = { requestId: randomUUID(), planId: plan.id, date: '2026-12-01', reason: '반품', amountExpression: refundAmount,
     expectedHash: cardCancellationPreview(book, 'editor', plan.id).expectedHash };
   refundPaidCardPurchase(book, 'editor', refund);
   return { book, plan, refund };
@@ -34,6 +38,137 @@ function fixture(filename) {
 const request = (book, refund, amountExpression = '5000') => ({ requestId: randomUUID(), refundId: refund.requestId,
   cashId: 'cash', date: '2026-12-02', reason: '환급 입금', amountExpression,
   expectedHash: cardRefundReceiptPreview(book, 'editor', refund.requestId).expectedHash });
+
+function existingReceipt(book, overrides = {}) {
+  const entry = { id: randomUUID(), kind: 'manual', createdBy: 'editor', sourceAccountId: 'card',
+    date: '2026-12-02', memo: '<환급 & 은행>', postings: [
+      { accountId: 'cash', side: 'debit', amount: 5000 }, { accountId: 'card', side: 'credit', amount: 5000 }], ...overrides };
+  book.record(entry); return entry;
+}
+const linkRequest = (book, refund, entry) => ({ requestId: randomUUID(), refundId: refund.requestId, entryId: entry.id,
+  reason: '<연결 & 확인>', expectedHash: cardRefundReceiptPreview(book, 'editor', refund.requestId).expectedHash,
+  expectedEntryHash: entryFingerprint(entry) });
+
+test('link existing receipt leaves ledger, budget, reports and plan unchanged and protects editing and reversal', () => {
+  const { book, refund, plan } = fixture();
+  try {
+    const entry = existingReceipt(book); const input = linkRequest(book, refund, entry);
+    const before = { entries: book.entries(), reports: book.reports('2026-12-01', '2026-12-31'), budget: book.budget('2026-12'), plan: book.cardPlan(plan.id) };
+    assert.equal(cardRefundReceiptCandidates(book, 'editor', refund.requestId)[0].entry.id, entry.id);
+    assert.equal(linkCardRefundReceipt(book, 'editor', input).duplicate, false);
+    assert.deepEqual({ entries: book.entries(), reports: book.reports('2026-12-01', '2026-12-31'), budget: book.budget('2026-12'), plan: book.cardPlan(plan.id) }, before);
+    assert.equal(cardRefundReceiptPreview(book, 'editor', refund.requestId).remaining, 7000);
+    assert.equal(linkCardRefundReceipt(book, 'editor', input).duplicate, true);
+    assert.equal(cardRefundReceiptCandidates(book, 'editor', refund.requestId).length, 0);
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', { ...input, reason: 'different' }), /reused/);
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', { ...linkRequest(book, refund, entry) }), /already linked/);
+    assert.throws(() => manualEditPreview(book, 'editor', entry.id), /cannot be edited/);
+    assert.throws(() => manualReversalPreview(book, 'editor', entry.id), /cannot be reversed/);
+    assert.throws(() => book.db.prepare('UPDATE entries SET data = data WHERE id = ?').run(entry.id), /cannot be changed/);
+    assert.throws(() => book.db.prepare('DELETE FROM entries WHERE id = ?').run(entry.id), /cannot be changed/);
+    assert.throws(() => recordCardRefundReceipt(book, 'editor', { ...request(book, refund), requestId: input.requestId }), /reused/);
+  } finally { book.close(); }
+});
+
+test('existing receipt rejects changed entries, stale refund state, dates, excess amounts and mismatched postings', () => {
+  const { book, refund } = fixture();
+  try {
+    const entry = existingReceipt(book); const input = linkRequest(book, refund, entry);
+    const changed = { ...entry, memo: 'changed' };
+    book.db.prepare('UPDATE entries SET data = ? WHERE id = ?').run(JSON.stringify(changed), entry.id);
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', input), /changed/);
+    recordCardRefundReceipt(book, 'editor', request(book, refund, '1'));
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', { ...input, expectedEntryHash: entryFingerprint(changed) }), /changed/);
+    for (const overrides of [ { date: '2026-11-30' },
+      { postings: [{ accountId: 'cash', side: 'debit', amount: 12000 }, { accountId: 'card', side: 'credit', amount: 12000 }] },
+      { kind: 'manual-reversal' }, { createdBy: 'other' },
+      { postings: [{ accountId: 'cash', side: 'debit', amount: 1000 }, { accountId: 'expense', side: 'credit', amount: 1000 }] } ]) {
+      const bad = existingReceipt(book, overrides);
+      assert.throws(() => linkCardRefundReceipt(book, 'editor', linkRequest(book, refund, bad)), /precedes|exceeds|matching/);
+      assert.ok(!cardRefundReceiptCandidates(book, 'editor', refund.requestId).some(c => c.entry.id === bad.id));
+    }
+    assert.equal(book.db.prepare('SELECT count(*) AS n FROM card_refund_receipts').get().n, 1);
+  } finally { book.close(); }
+});
+
+test('linked adjustment blocks batch reversal and reversed adjustments are not candidates', () => {
+  const { book, refund } = fixture();
+  try {
+    const input = { requestId: randomUUID(), date: '2026-12-02', reason: '환급', rows: [{ debitId: 'cash', creditId: 'card', amountExpression: '5000' }] };
+    const batch = recordAdjustment(book, 'owner', input).batch;
+    const entry = book.entries().find(e => e.id === batch.entryIds[0]);
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', linkRequest(book, refund, entry)), /matching/);
+    linkCardRefundReceipt(book, 'owner', linkRequest(book, refund, entry));
+    assert.throws(() => reverseAdjustment(book, 'owner', { batchId: batch.id, date: '2026-12-03', reason: '취소' }), /linked card refund/);
+    const next = recordAdjustment(book, 'owner', { ...input, requestId: randomUUID() }).batch;
+    reverseAdjustment(book, 'owner', { batchId: next.id, date: '2026-12-03', reason: '취소' });
+    const reversed = book.entries().find(e => e.id === next.entryIds[0]);
+    assert.throws(() => linkCardRefundReceipt(book, 'owner', linkRequest(book, refund, reversed)), /reversed/);
+    assert.equal(cardRefundReceiptCandidates(book, 'owner', refund.requestId).length, 0);
+  } finally { book.close(); }
+});
+
+test('one existing bank entry cannot settle two separate refunds', () => {
+  const { book, refund, plan } = fixture(undefined, '5000');
+  try {
+    const nextRefund = { ...refund, requestId: randomUUID(), amountExpression: '7000',
+      expectedHash: cardCancellationPreview(book, 'editor', plan.id).expectedHash };
+    refundPaidCardPurchase(book, 'editor', nextRefund);
+    const entry = existingReceipt(book);
+    const input = linkRequest(book, refund, entry);
+    linkCardRefundReceipt(book, 'editor', input);
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', linkRequest(book, nextRefund, entry)), /already linked/);
+    assert.equal(cardRefundReceiptPreview(book, 'editor', nextRefund.requestId).remaining, 7000);
+    assert.equal(linkCardRefundReceipt(book, 'editor', input).duplicate, true);
+  } finally { book.close(); }
+});
+
+test('metadata linking works in locked periods, survives reopen and rechecks current access on replay', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'receipt-link-')); let book;
+  try {
+    const setup = fixture(join(dir, 'book.sqlite')); book = setup.book;
+    const entry = existingReceipt(book); const input = linkRequest(book, setup.refund, entry);
+    book.db.prepare('INSERT INTO account_period_locks (account_id, through_date, data) VALUES (?, ?, ?)').run('cash', '2026-12-31', '{}');
+    linkCardRefundReceipt(book, 'editor', input); book.close(); book = new Book(join(dir, 'book.sqlite'));
+    assert.equal(linkCardRefundReceipt(book, 'editor', input).duplicate, true);
+    assert.equal(book.entries().length, 4);
+    setMember(book, 'owner', 'editor', 'editor', ['card']);
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', input), /write access/);
+    assert.equal(cardRefundReceiptCandidates(book, 'editor', setup.refund.requestId).length, 0);
+  } finally { book?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('failed linked audit rolls back without freezing the original transaction', () => {
+  const { book, refund } = fixture();
+  try {
+    const entry = existingReceipt(book);
+    book.db.exec("CREATE TRIGGER fail_link BEFORE INSERT ON card_refund_receipts BEGIN SELECT RAISE(ABORT, 'audit failed'); END");
+    assert.throws(() => linkCardRefundReceipt(book, 'editor', linkRequest(book, refund, entry)), /audit failed/);
+    assert.equal(cardRefundReceiptPreview(book, 'editor', refund.requestId).remaining, 12000);
+    book.db.prepare('UPDATE entries SET data = data WHERE id = ?').run(entry.id);
+  } finally { book.close(); }
+});
+
+test('HTTP existing receipt link validates CSRF and confirmation, escapes candidates and adds no entries', async () => {
+  const { book, refund } = fixture(); let sub = 'editor';
+  const entry = existingReceipt(book);
+  const server = createImportApi(book, { auth: { session: () => ({ sub, role: sub, csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/cards/refund-receipt`;
+  try {
+    const page = await (await fetch(`${base}?refundId=${refund.requestId}`)).text();
+    assert.match(page, /&lt;환급 &amp; 은행&gt;/); assert.match(page, /refund-receipt\/link/);
+    const input = { ...linkRequest(book, refund, entry), csrf: 'token', confirmed: 'true' };
+    const send = data => fetch(`${base}/link`, { method: 'POST', body: new URLSearchParams(data) });
+    assert.equal((await send({ ...input, csrf: 'wrong' })).status, 403);
+    assert.equal((await send({ ...input, confirmed: 'false' })).status, 400);
+    sub = 'viewer'; assert.equal((await send(input)).status, 400);
+    sub = 'editor'; const response = await send(input); assert.equal(response.status, 200);
+    assert.match(await response.text(), /기존 거래 연결/);
+    assert.equal((await send(input)).status, 200);
+    assert.equal(book.entries().length, 4);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
 
 test('cash receipt increases cash and clears card credit without repeating expense or budget refunds', () => {
   const { book, plan, refund } = fixture();

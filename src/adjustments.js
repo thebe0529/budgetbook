@@ -80,6 +80,9 @@ export function reverseAdjustment(book, sub, { batchId, date, reason }) {
       ({ ...a, amount: -a.amount })) } : {}) }));
   entries.forEach(entry => { validateEntry(entry, book.accounts()); book.validateBudgetAllocations(entry); });
   return book.atomic(() => {
+    if (original.entryIds.some(entryId => book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE entry_id = ?').get(entryId))) {
+      throw new Error('Adjustment contains a linked card refund receipt and cannot be reversed');
+    }
     book.db.prepare('INSERT INTO adjustment_reversals (original_id, reversal_id) VALUES (?, ?)')
       .run(batchId, id);
     entries.forEach(entry => book.record(entry));

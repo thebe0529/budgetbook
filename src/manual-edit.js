@@ -13,7 +13,8 @@ export function manualEditPreview(book, sub, entryId) {
     !canAccessAccount(book, sub, entry.sourceAccountId, 'write') ||
     entry.postings.some(p => ['asset', 'liability'].includes(accounts.get(p.accountId)?.type) &&
       !canAccessAccount(book, sub, p.accountId, 'write')) ||
-    book.db.prepare('SELECT 1 FROM transaction_reversals WHERE original_id = ?').get(entryId)) denied();
+    book.db.prepare('SELECT 1 FROM transaction_reversals WHERE original_id = ?').get(entryId) ||
+    book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE entry_id = ?').get(entryId)) denied();
   const source = entry.postings.find(p => p.accountId === entry.sourceAccountId);
   const counter = entry.postings.find(p => p.accountId !== entry.sourceAccountId);
   if (!source || !counter) denied();

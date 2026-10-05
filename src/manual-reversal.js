@@ -6,7 +6,8 @@ export function manualReversalPreview(book, sub, entryId) {
   const row = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entryId);
   const entry = row && JSON.parse(row.data);
   const accounts = book.accounts();
-  if (!entry || !['manual', 'manual-split'].includes(entry.kind) || !entry.sourceAccountId ||
+  if (book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE entry_id = ?').get(entryId) ||
+      !entry || !['manual', 'manual-split'].includes(entry.kind) || !entry.sourceAccountId ||
       (entry.createdBy !== sub && member(book, sub)?.role !== 'owner') ||
       !canAccessAccount(book, sub, entry.sourceAccountId, 'write') ||
       entry.postings.some(p => ['asset', 'liability'].includes(accounts.get(p.accountId)?.type) &&

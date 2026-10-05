@@ -9,7 +9,7 @@ import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
-import { cardRefundReceiptPreview, recordCardRefundReceipt } from './card-refund-receipt.js';
+import { cardRefundReceiptPreview, recordCardRefundReceipt, cardRefundReceiptCandidates, linkCardRefundReceipt } from './card-refund-receipt.js';
 import { refundPaidCardPurchase } from './card-refund.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
 import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
@@ -752,7 +752,17 @@ function renderCardRefundReceipt(book, session, refundId, message = '') {
   const cash = [...accounts.values()].filter(a => a.type === 'asset' && a.cash && canAccessAccount(book, session.sub, a.id, 'write'));
   const rows = receipts.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원</td>
     <td>${a.restricted ? '계좌 접근 제한' : escape(accounts.get(a.cashId)?.name ?? '')}</td>
-    <td>${a.restricted ? '접근 제한' : escape(a.reason)}</td><td>${a.restricted ? '접근 제한' : `${escape(a.actor)} · ${escape(a.createdAt)} (UTC)`}</td></tr>`).join('');
+    <td>${a.restricted ? '접근 제한' : escape(a.reason)}</td><td>${a.restricted ? '접근 제한' : `${escape(a.actor)} · ${escape(a.createdAt)} (UTC)`}</td><td>${a.restricted ? '접근 제한' : `${a.mode === 'linked' ? '기존 거래 연결' : '새 입금 기록'} · ${escape(a.entryId)}`}</td></tr>`).join('');
+  const candidates = cardRefundReceiptCandidates(book, session.sub, refundId);
+  const links = candidates.length ? `<h2>이미 기록한 입금 연결</h2><p>연결 가능한 최근 거래 최대 200건입니다. 원장 분개를 추가하지 않습니다. 연결 후 거래 수정·삭제·취소는 제한됩니다.</p>
+    ${candidates.map(({ entry, cashId, amount, expectedEntryHash }) => `<form method="post" action="/admin/cards/refund-receipt/link">
+      <p>${escape(entry.date)} · ${escape(accounts.get(cashId).name)} · ${amount.toLocaleString('ko-KR')}원 · ${escape(entry.memo ?? '')} · ${escape(entry.id)}</p>
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="refundId" value="${escape(refundId)}">
+      <input type="hidden" name="entryId" value="${escape(entry.id)}"><input type="hidden" name="expectedEntryHash" value="${escape(expectedEntryHash)}">
+      <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
+      <label>연결 메모</label><input name="reason" maxlength="200" required>
+      <label><input type="checkbox" name="confirmed" value="true" style="width:auto" required>이 거래가 해당 카드 환불금의 실제 입금임을 확인했습니다.</label><button>기존 입금 연결</button></form>`).join('')}` :
+    allowed && remaining > 0 ? '<p>연결 가능한 기존 입금이 없습니다. 같은 카드의 대변과 현금성 자산의 차변으로만 구성된 두 행 거래를 연결할 수 있습니다. 금액·입금일·쓰기 권한도 확인합니다.</p>' : '';
   const form = !allowed ? '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 입금을 기록할 수 있습니다.</p>' : remaining <= 0 ?
     '<p class="notice">이 환불의 전액을 계좌 입금으로 기록했습니다.</p>' : !cash.length ? '<p>쓰기 가능한 현금성 자산 계좌가 필요합니다.</p>' : `<h2>실제 계좌 입금 기록</h2>
     <form method="post" action="/admin/cards/refund-receipt">
@@ -765,8 +775,8 @@ function renderCardRefundReceipt(book, session, refundId, message = '') {
     <label><input type="checkbox" name="confirmed" value="true" style="width:auto" required>실제 입금을 확인했으며 이미 기록한 입금과 중복되지 않습니다.</label><button>환불금 계좌 입금 저장</button></form>`;
   return page('카드 환불금 계좌 입금', `${message}<p>카드: ${escape(accounts.get(plan.cardId).name)} · 환불일: ${escape(refund.date)} · 사유: ${escape(refund.reason)}</p>
     <p>환불액 ${refund.amount.toLocaleString('ko-KR')}원 · 기록한 계좌 입금 ${received.toLocaleString('ko-KR')}원 · 추가 입금 기록 한도 ${remaining.toLocaleString('ko-KR')}원</p>
-    <p>실제로 은행 계좌에 받은 환불금만 기록하세요. 다음 카드 청구 차감으로 사용한 금액은 여기에 입금으로 기록하지 않습니다. 은행 자산 증가와 카드 잔액 조정만 기록하며 비용·예산을 다시 되돌리지 않습니다. 이미 수신/수기로 원장에 기록한 같은 입금은 다시 입력하지 마세요. 기존 입금 거래 연결은 후속 범위입니다.</p>
-    ${form}<h2>계좌 입금 이력</h2><table><tr><th>입금일</th><th>금액</th><th>입금 계좌</th><th>메모</th><th>작업자·시각</th></tr>${rows || '<tr><td colspan="5">입금 기록이 없습니다.</td></tr>'}</table>
+    <p>실제로 은행 계좌에 받은 환불금만 기록하세요. 다음 카드 청구 차감으로 사용한 금액은 여기에 입금으로 기록하지 않습니다. 은행 자산 증가와 카드 잔액 조정만 기록하며 비용·예산을 다시 되돌리지 않습니다. 이미 원장에 기록한 같은 입금은 아래 기존 입금 연결을 사용하세요. 수입·비용 거래는 자동 재분류하지 않으며 한 거래를 여러 환불에 나눠 연결할 수 없습니다.</p>
+    ${links}${form}<h2>계좌 입금 이력</h2><table><tr><th>입금일</th><th>금액</th><th>입금 계좌</th><th>메모</th><th>작업자·시각</th><th>기록 방식·거래</th></tr>${rows || '<tr><td colspan="6">입금 기록이 없습니다.</td></tr>'}</table>
     <p><a href="/admin/cards/cancel?planId=${encodeURIComponent(plan.id)}">구매 취소·환불 이력으로 돌아가기</a></p>`);
 }
 
@@ -1189,6 +1199,15 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     }
     if (req.method === 'GET' && pathname === '/admin/cards/refund-receipt') {
       sendHtml(res, 200, renderCardRefundReceipt(book, session, new URL(req.url, 'http://localhost').searchParams.get('refundId'))); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/cards/refund-receipt/link') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      if (form.get('confirmed') !== 'true') throw new Error('Confirm existing transaction is actual refund receipt');
+      const result = linkCardRefundReceipt(book, session.sub, { refundId: form.get('refundId'), entryId: form.get('entryId'),
+        reason: form.get('reason'), requestId: form.get('requestId'), expectedHash: form.get('expectedHash'), expectedEntryHash: form.get('expectedEntryHash') });
+      sendHtml(res, 200, renderCardRefundReceipt(book, session, form.get('refundId'),
+        `<p class="notice">${result.duplicate ? '이미 연결한' : '연결한'} 기존 환불금 입금입니다. 원장 분개는 추가하지 않았습니다.</p>`)); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/cards/refund-receipt') {
       const form = await formBody(req);

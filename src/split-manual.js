@@ -79,6 +79,7 @@ export function recordSplitManual(book, userSub, input) {
 }
 
 export function editableManual(book, userSub, entryId) {
+  if (book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE entry_id = ?').get(entryId)) return null;
   if (book.db.prepare('SELECT 1 FROM transaction_reversals WHERE original_id = ?').get(entryId)) return null;
   const row = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(entryId);
   const entry = row && JSON.parse(row.data);
