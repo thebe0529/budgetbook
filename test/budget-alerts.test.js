@@ -5,7 +5,7 @@ import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { recordManual } from '../src/manual.js';
 import { recordSplitManual } from '../src/split-manual.js';
-import { budgetOverspending, budgetCategoryActivity, budgetCategoryActivityCsv } from '../src/budget-alerts.js';
+import { budgetOverspending, budgetCategoryActivity, budgetCategoryActivityCsv, budgetActivityFilters } from '../src/budget-alerts.js';
 import { manualReversalPreview, reverseManualTransaction } from '../src/manual-reversal.js';
 import { updateSelectedCategories } from '../src/bulk-memo.js';
 import { entryFingerprint, setTransactionChecked } from '../src/transaction-checks.js';
@@ -158,5 +158,69 @@ test('budget alerts and drilldown HTTP are owner-only, read-only, escaped and ex
     for (const suffix of ['?month=2026-10', '/category?month=2026-10&categoryId=food', '/category.csv?month=2026-10&categoryId=food']) {
       const denied = await fetch(base + suffix); assert.equal(denied.status, 400); assert.doesNotMatch(await denied.text(), /식비/);
     }
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('category search and amount sorting precede pagination while full-month spending and deficits stay intact', () => {
+  const book = setup();
+  try {
+    for (let i = 1; i <= 205; i++) create(book, '2026-10-01', i, 'food', { memo: `Café ${i}` });
+    create(book, '2026-10-01', 999, 'food', { memo: '다른 거래' });
+    const first = budgetCategoryActivity(book, 'owner', '2026-10', 'food', { memo: ' CAFE\u0301 ', sort: 'amount-desc' });
+    assert.equal(first.rows.length, 200); assert.equal(first.rows[0].amount, 205); assert.equal(first.rows.at(-1).amount, 6);
+    assert.equal(first.matchedCount, 205); assert.equal(first.matchedTotal, 21115); assert.equal(first.total, 22114);
+    assert.equal(first.deficit, 22114); assert.equal(first.monthlyCount, 206);
+    const second = budgetCategoryActivity(book, 'owner', '2026-10', 'food', { memo: 'café', sort: 'amount-desc', page: 2 });
+    assert.deepEqual(second.rows.map(row => row.amount), [5, 4, 3, 2, 1]); assert.equal(second.total, first.total);
+    const beyond = budgetCategoryActivity(book, 'owner', '2026-10', 'food', { memo: 'café', page: 999 }); assert.equal(beyond.page, 2);
+    const empty = budgetCategoryActivity(book, 'owner', '2026-10', 'food', { memo: '없음', page: 2 });
+    assert.equal(empty.page, 1); assert.equal(empty.pages, 1); assert.equal(empty.rows.length, 0); assert.equal(empty.total, 22114);
+    const csv = budgetCategoryActivityCsv(book, 'owner', '2026-10', 'food', { memo: 'café', sort: 'amount-desc', page: 2 });
+    assert.equal(csv.split('\r\n').filter(Boolean).length, 206); assert.ok(csv.indexOf('"Café 205"') < csv.indexOf('"Café 1"'));
+    assert.doesNotMatch(csv, /다른 거래/);
+  } finally { book.close(); }
+});
+
+test('category date sorts retain ties, negative cancellations sort by signed value and invalid filters are rejected', () => {
+  const book = setup();
+  try {
+    const older = create(book, '2026-10-01', 100, 'food', { memo: '대상' });
+    const newer = create(book, '2026-10-02', 200, 'food', { memo: '대상' });
+    reverseManualTransaction(book, 'owner', { entryId: older.id, date: '2026-10-03', reason: '취소',
+      expectedHash: manualReversalPreview(book, 'owner', older.id).expectedHash, requestId: randomUUID() });
+    assert.deepEqual(budgetCategoryActivity(book, 'owner', '2026-10', 'food', { sort: 'amount-asc' }).rows.map(row => row.amount), [-100, 100, 200]);
+    const asc = budgetCategoryActivity(book, 'owner', '2026-10', 'food', { sort: 'date-asc' });
+    assert.equal(asc.rows[0].id, older.id); assert.equal(asc.rows[1].id, newer.id);
+    for (const options of [{ sort: 'unknown' }, { memo: null }, { memo: 'x'.repeat(201) }, { page: 0 }, { page: 1.5 }, { page: '2' }]) {
+      assert.throws(() => budgetCategoryActivity(book, 'owner', '2026-10', 'food', options));
+    }
+    for (const page of ['0', '-1', '1.5', '1e2', '9007199254740992']) assert.throws(() => budgetActivityFilters(new URLSearchParams({ page })));
+    assert.equal(budgetActivityFilters(new URLSearchParams()).page, 1);
+  } finally { book.close(); }
+});
+
+test('HTTP category pagination and month navigation retain search and sorting and CSV exports all matches', async () => {
+  const book = setup(); for (let i = 1; i <= 205; i++) create(book, '2026-10-01', i, 'food', { memo: `Cafe ${i}` });
+  create(book, '2026-10-02', 999, 'food', { memo: '비검색 거래' });
+  let sub = 'owner';
+  const server = createImportApi(book, { auth: { session: () => ({ sub, role: sub, csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/budget/category`;
+  try {
+    const query = new URLSearchParams({ month: '2026-10', categoryId: 'food', memo: 'CAFE', sort: 'amount-desc', page: '2' });
+    const response = await fetch(`${base}?${query}`); assert.equal(response.status, 200);
+    const html = await response.text(); assert.match(html, /2 \/ 2 페이지/); assert.match(html, /value="amount-desc" selected/);
+    assert.match(html, /name="memo" maxlength="200" value="CAFE"/); assert.match(html, /조건에 맞는 205건/);
+    assert.match(html, /검색 결과 합계 21,115원/); assert.match(html, /예산 지출 합계 22,114원/); assert.doesNotMatch(html, /Cafe 205<\/td>/);
+    assert.match(html, /month=2026-09&amp;categoryId=food&amp;memo=CAFE&amp;sort=amount-desc&amp;page=1/);
+    const download = html.match(/href="([^\"]*\/category.csv\?[^\"]*)"/)[1].replaceAll('&amp;', '&');
+    assert.ok(!download.includes('page='));
+    const csv = await (await fetch(new URL(download, base))).text();
+    assert.equal(csv.replace(/^\uFEFF/, ''), budgetCategoryActivityCsv(book, 'owner', '2026-10', 'food', budgetActivityFilters(query)).replace(/^\uFEFF/, ''));
+    assert.equal(csv.split('\r\n').filter(Boolean).length, 206); assert.match(csv, /Cafe 205/); assert.match(csv, /Cafe 1"/);
+    for (const bad of ['sort=unknown', 'page=0', `memo=${'x'.repeat(201)}`]) {
+      for (const suffix of ['', '.csv']) assert.equal((await fetch(`${base}${suffix}?month=2026-10&categoryId=food&${bad}`)).status, 400);
+    }
+    sub = 'viewer'; assert.equal((await fetch(new URL(download, base))).status, 400);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
