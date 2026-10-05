@@ -9,7 +9,7 @@ import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
-import { cardCancellationPreview, cancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
+import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
 import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
 import { cardCashDefault, setCardCashDefault, recordCardPurchase, recordCardPayment, recordCardPaymentBatch, visibleCardSchedule } from './card-manual.js';
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
@@ -707,21 +707,30 @@ function renderBudgetCategoryActivity(book, session, month, categoryId, options)
 }
 
 function renderCardCancellation(book, session, planId, message = '') {
-  const { plan, entry, allowed, hasPayments, expectedHash, cancellation } = cardCancellationPreview(book, session.sub, planId);
+  const { plan, entry, allowed, hasPayments, expectedHash, cancellation, partials, remainingAmount } = cardCancellationPreview(book, session.sub, planId);
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   const amount = entry.postings.filter(p => p.accountId === plan.cardId && p.side === 'credit').reduce((sum, p) => sum + p.amount, 0);
+  const minimumDate = plan.lastPartialDate ?? entry.date;
   const state = cancellation ? `<h2>취소 이력</h2>
     <p>취소일: ${escape(cancellation.date)} · 취소자: ${escape(cancellation.actor)} · 처리 시각: ${escape(cancellation.createdAt)} (UTC)</p>
-    <p>사유: ${escape(cancellation.reason)}</p><p>취소 분개: ${escape(cancellation.reversalId)}</p>` : hasPayments ?
-    '<p class="notice">이미 납부한 회차가 있어 전체 취소할 수 없습니다. 납부 후 환불 처리는 후속 기능입니다.</p>' : !allowed ?
+    <p>사유: ${escape(cancellation.reason)} · 취소 금액: ${(cancellation.amount ?? amount).toLocaleString('ko-KR')}원</p><p>취소 분개: ${escape(cancellation.reversalId)}</p>` : hasPayments ?
+    '<p class="notice">이미 납부한 회차가 있어 전체·부분취소할 수 없습니다. 납부 후 환불 처리는 후속 기능입니다.</p>' : !allowed ?
     '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 취소할 수 있습니다.</p>' : `<form method="post" action="/admin/cards/cancel">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="planId" value="${escape(plan.id)}">
     <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
-    <label>취소일 (구매일 이후)</label><input type="date" name="date" min="${escape(entry.date)}" value="${today < entry.date ? entry.date : today}" required>
-    <label>취소 사유</label><input name="reason" maxlength="200" required><button>미결제 구매 전체 취소</button></form>`;
-  return page('카드 구매 취소', `${message}<p>카드: ${escape(book.accounts().get(plan.cardId).name)} · 구매일: ${escape(entry.date)} · 금액: ${amount.toLocaleString('ko-KR')}원 · ${plan.installments.length}회차</p>
-    <p>메모: ${escape(entry.memo ?? '')}</p><p>원거래를 보존하고 취소일에 반대 분개를 기록합니다. 비용과 예산은 취소일이 속한 달에 되돌리며 모든 미결제 예정액을 제외합니다. 취소일이 계좌 잠금 기간이면 저장할 수 없습니다. 부분취소와 납부 후 환불은 아직 지원하지 않습니다.</p>
-    ${state}<p><a href="/admin/register?accountId=${encodeURIComponent(plan.cardId)}">카드 원장</a> · <a href="/admin/cards">카드 예정액으로 돌아가기</a></p>`);
+    <label>취소일 (구매일·최근 부분취소일 이후)</label><input type="date" name="date" min="${escape(minimumDate)}" value="${today < minimumDate ? minimumDate : today}" required>
+    <label>취소 사유</label><input name="reason" maxlength="200" required><button>미결제 잔여 구매 전체 취소</button></form>
+    <h2>부분취소</h2><p>남은 구매 금액보다 작은 금액만 입력하세요. 취소 후 남은 금액은 기존 회차 수로 균등 배분하고 원 단위 나머지는 앞 회차에 배분합니다. 예정일은 유지하며 0원 회차는 예정액·납부에서 제외합니다. 카드사 청구서와 비교하세요.</p>
+    <form method="post" action="/admin/cards/cancel-partial">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="planId" value="${escape(plan.id)}">
+    <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
+    <label>부분취소일</label><input type="date" name="date" min="${escape(minimumDate)}" value="${today < minimumDate ? minimumDate : today}" required>
+    <label>취소 금액 (사칙연산 가능)</label><input name="amountExpression" maxlength="256" required>
+    <label>취소 사유</label><input name="reason" maxlength="200" required><button>미결제 구매 부분취소</button></form>`;
+  const partialHistory = partials.length ? `<h2>부분취소 이력</h2><table><tr><th>취소일</th><th>금액</th><th>사유</th><th>작업자·UTC 시각</th><th>취소 분개</th></tr>${partials.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원</td><td>${escape(a.reason)}</td><td>${escape(a.actor)} · ${escape(a.createdAt)}</td><td>${escape(a.entryId)}</td></tr>`).join('')}</table>` : '';
+  return page('카드 구매 취소', `${message}<p>카드: ${escape(book.accounts().get(plan.cardId).name)} · 구매일: ${escape(entry.date)} · 최초 금액: ${amount.toLocaleString('ko-KR')}원 · 취소 후 남은 구매 금액: ${remainingAmount.toLocaleString('ko-KR')}원 · ${plan.installments.length}회차</p>
+    <p>메모: ${escape(entry.memo ?? '')}</p><p>원거래를 보존하고 취소일에 반대 분개를 기록합니다. 비용과 예산은 취소일이 속한 달에 되돌리며 전체 취소는 모든 미결제 예정액을 제외하고 부분취소는 남은 금액으로 예정액을 다시 계산합니다. 취소일이 계좌 잠금 기간이면 저장할 수 없습니다. 이미 납부한 구매의 환불은 아직 지원하지 않습니다.</p>
+    ${state}${partialHistory}<p><a href="/admin/register?accountId=${encodeURIComponent(plan.cardId)}">카드 원장</a> · <a href="/admin/cards">카드 예정액으로 돌아가기</a></p>`);
 }
 
 function renderCards(book, session, throughDate, message = '', preview = {}) {
@@ -755,13 +764,13 @@ function renderCards(book, session, throughDate, message = '', preview = {}) {
   const months = [...grouped].map(([month, total]) =>
     `<tr><td>${escape(month)}</td><td>${escape(total.toLocaleString('ko-KR'))}원</td></tr>`).join('');
   const rows = schedule.map(row => `<tr><td>${cash.length && canAccessAccount(book, session.sub, row.cardId, 'write') ?
-    `<input type="checkbox" form="card-bulk-pay" name="item" value="${escape(JSON.stringify([row.planId, row.index]))}" aria-label="${escape(row.memo)} ${row.index}회차 선택" style="width:auto">` : ''}</td><td>${escape(row.dueDate)}</td>
+    `<input type="checkbox" form="card-bulk-pay" name="item" value="${escape(JSON.stringify([row.planId, row.index, row.amount]))}" aria-label="${escape(row.memo)} ${row.index}회차 선택" style="width:auto">` : ''}</td><td>${escape(row.dueDate)}</td>
     <td>${escape(accounts.find(a => a.id === row.cardId)?.name ?? '')}</td>
     <td>${escape(row.memo)}</td><td>${row.index}회차</td>
     <td>${escape(row.amount.toLocaleString('ko-KR'))}원</td><td>${cash.length &&
       canAccessAccount(book, session.sub, row.cardId, 'write') ?
       `<form method="post" action="/admin/cards/pay"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
-      <input type="hidden" name="planId" value="${escape(row.planId)}"><input type="hidden" name="index" value="${row.index}">
+      <input type="hidden" name="planId" value="${escape(row.planId)}"><input type="hidden" name="index" value="${row.index}"><input type="hidden" name="expectedAmount" value="${row.amount}">
       <label>실제 결제일</label><input type="date" name="date" value="${escape(row.dueDate)}" required>
       <label>출금 계좌</label><select name="cashId">${options(cash, cardCashDefault(book, session.sub, row.cardId))}</select><button>결제 기록</button></form>` : ''}</td></tr>`).join('');
   const defaults = session.role !== 'owner' ? '' : `<h2>카드별 기본 출금 계좌</h2>${cards.map(card =>
@@ -789,7 +798,7 @@ function renderCards(book, session, throughDate, message = '', preview = {}) {
     <label>구매일</label><input type="date" name="purchaseDate" value="${escape(preview.date ?? '')}" required><button>예정일 계산</button></form>` : '';
   const purchases = visibleCardPurchases(book, session.sub).map(item => `<tr><td>${escape(item.entry.date)}</td>
     <td>${escape(accounts.find(a => a.id === item.plan.cardId)?.name ?? '')}</td><td>${escape(item.entry.memo ?? '')}</td>
-    <td>${item.cancellation ? '취소 완료' : item.hasPayments ? '납부 내역 있음' : '전 회차 미결제'}</td>
+    <td>${item.cancellation ? '취소 완료' : item.hasPayments ? '납부 내역 있음' : item.partials.length ? '부분취소 · 전 회차 미결제' : '전 회차 미결제'}</td>
     <td><a href="/admin/cards/cancel?planId=${encodeURIComponent(item.plan.id)}">${item.cancellation ? '취소 이력' : item.allowed && !item.hasPayments ? '전체 취소' : '구매 상세'}</a></td></tr>`).join('');
   const purchaseList = `<h2>카드 구매 내역</h2><p>조회 종료일과 무관하게 접근 가능한 최근 등록 구매 최대 200건을 표시합니다. 모든 회차가 미결제인 구매만 전체 취소할 수 있습니다.</p>
     <table><tr><th>구매일</th><th>카드</th><th>메모</th><th>상태</th><th>상세·취소</th></tr>${purchases || '<tr><td colspan="5">카드 구매 내역이 없습니다.</td></tr>'}</table>`;
@@ -1141,6 +1150,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
     if (req.method === 'GET' && pathname === '/admin/cards/cancel') {
       sendHtml(res, 200, renderCardCancellation(book, session, new URL(req.url, 'http://localhost').searchParams.get('planId'))); return true;
     }
+    if (req.method === 'POST' && pathname === '/admin/cards/cancel-partial') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const result = partiallyCancelCardPurchase(book, session.sub, { planId: form.get('planId'), date: form.get('date'),
+        reason: form.get('reason'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId'), amountExpression: form.get('amountExpression') });
+      sendHtml(res, 200, renderCardCancellation(book, session, form.get('planId'),
+        `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 카드 부분취소입니다.</p>`)); return true;
+    }
     if (req.method === 'POST' && pathname === '/admin/cards/cancel') {
       const form = await formBody(req);
       if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
@@ -1177,8 +1194,8 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       assertDate(throughDate);
       const items = form.getAll('item').map(value => {
         const parsed = JSON.parse(value);
-        if (!Array.isArray(parsed) || parsed.length !== 2) throw new Error('Invalid installment selection');
-        return { planId: parsed[0], index: parsed[1] };
+        if (!Array.isArray(parsed) || ![2, 3].includes(parsed.length)) throw new Error('Invalid installment selection');
+        return { planId: parsed[0], index: parsed[1], ...(parsed.length === 3 ? { expectedAmount: parsed[2] } : {}) };
       });
       const result = recordCardPaymentBatch(book, session.sub, { items, requestId: form.get('requestId'),
         date: form.get('date'), cashId: form.get('cashId') });
@@ -1198,7 +1215,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         categoryId: form.get('categoryId') || null, memo: form.get('memo') || '',
       }) : recordCardPayment(book, session.sub, {
         planId: form.get('planId'), index: Number(form.get('index')),
-        date: form.get('date'), cashId: form.get('cashId'),
+        date: form.get('date'), cashId: form.get('cashId'), expectedAmount: form.has('expectedAmount') ? Number(form.get('expectedAmount')) : undefined,
       });
       const throughDate = pathname.endsWith('purchase') ?
         result.plan.installments.at(-1).dueDate : '9999-12-31';
