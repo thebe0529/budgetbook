@@ -17,9 +17,18 @@ export function cardCancellationPreview(book, sub, planId) {
   const saved = book.db.prepare('SELECT data FROM transaction_reversals WHERE original_id = ?').get(entry.id);
   const partials = book.db.prepare('SELECT data FROM card_partial_cancellations WHERE plan_id = ? ORDER BY rowid').all(planId)
     .map(row => JSON.parse(row.data));
+  const refunds = book.db.prepare('SELECT data FROM card_refunds WHERE plan_id = ? ORDER BY rowid').all(planId).map(row => JSON.parse(row.data));
+  const payments = plan.installments.filter(item => item.paidEntryId).map(item => {
+    const row = book.db.prepare('SELECT data FROM entries WHERE id = ?').get(item.paidEntryId);
+    if (!row) throw new Error('Card payment entry missing');
+    return JSON.parse(row.data);
+  });
+  const fullyPaid = payments.length > 0 && plan.installments.every(item => item.amount === 0 || item.paidEntryId);
+  const minimumRefundDate = [entry.date, plan.lastPartialDate, plan.lastRefundDate, ...payments.map(p => p.date)].filter(Boolean).sort().at(-1);
   return { plan, entry, allowed, hasPayments: plan.installments.some(item => item.paidEntryId),
-    partials, remainingAmount: plan.cancellationId ? 0 : plan.installments.reduce((sum, item) => sum + item.amount, 0),
-    expectedHash: entryFingerprint({ plan, entry }), cancellation: saved ? JSON.parse(saved.data) : null };
+    partials, refunds, fullyPaid, payments, minimumRefundDate,
+    remainingAmount: plan.cancellationId ? 0 : plan.installments.reduce((sum, item) => sum + item.amount, 0) - (plan.refundedAmount ?? 0),
+    expectedHash: entryFingerprint({ plan, entry, ...(payments.length ? { payments } : {}) }), cancellation: saved ? JSON.parse(saved.data) : null };
 }
 
 export function visibleCardPurchases(book, sub) {
@@ -43,6 +52,7 @@ export function cancelCardPurchase(book, sub, { planId, date, reason, expectedHa
   return book.atomic(() => {
     const { plan, entry: original, allowed, hasPayments, cancellation, expectedHash: currentHash } = cardCancellationPreview(book, sub, planId);
     if (!allowed) throw new Error('Card purchase cancellation requires author or owner and write access');
+    if (book.db.prepare('SELECT 1 FROM card_refunds WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     if (book.db.prepare('SELECT 1 FROM card_partial_cancellations WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     const sent = book.db.prepare('SELECT data FROM transaction_reversals WHERE request_id = ?').get(requestId);
     if (sent) {
@@ -87,6 +97,7 @@ export function partiallyCancelCardPurchase(book, sub, { planId, date, reason, e
     const preview = cardCancellationPreview(book, sub, planId);
     const { plan, entry: original, allowed, hasPayments, remainingAmount, cancellation } = preview;
     if (!allowed) throw new Error('Card purchase cancellation requires author or owner and write access');
+    if (book.db.prepare('SELECT 1 FROM card_refunds WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     if (book.db.prepare('SELECT 1 FROM transaction_reversals WHERE request_id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     const sent = book.db.prepare('SELECT data FROM card_partial_cancellations WHERE id = ?').get(requestId);
     if (sent) {
