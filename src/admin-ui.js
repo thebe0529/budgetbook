@@ -9,6 +9,7 @@ import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
+import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
 import { cardCashDefault, setCardCashDefault, recordCardPurchase, recordCardPayment, recordCardPaymentBatch, visibleCardSchedule } from './card-manual.js';
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
   matchingEntries, saveSchedule, unlinkOccurrence } from './forecast.js';
@@ -704,7 +705,7 @@ function renderBudgetCategoryActivity(book, session, month, categoryId, options)
     <p><a href="/admin/budget/category.csv?${escape(csvQuery.toString())}">조건에 맞는 전체 지출 CSV 다운로드</a></p>`);
 }
 
-function renderCards(book, session, throughDate, message = '') {
+function renderCards(book, session, throughDate, message = '', preview = {}) {
   assertDate(throughDate);
   const accounts = [...book.accounts().values()];
   const cards = accounts.filter(a => a.card && a.type === 'liability' &&
@@ -718,12 +719,13 @@ function renderCards(book, session, throughDate, message = '') {
     <form method="post" action="/admin/cards/purchase">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}">
     <input type="hidden" name="requestId" value="${randomUUID()}">
-    <label>카드</label><select name="cardId">${options(cards)}</select>
-    <label>구매일</label><input type="date" name="date" required>
+    <label>카드</label><select name="cardId">${options(cards, preview.cardId)}</select>
+    <label>구매일</label><input type="date" name="date" value="${escape(preview.date ?? '')}" required>
     <label>비용 계정</label><select name="expenseId">${options(expenses)}</select>
     <label>금액 (사칙연산 가능)</label><input name="amountExpression" required>
     <label>할부 개월 수 (일시불은 1)</label><input type="number" name="count" min="1" max="120" value="1" required>
-    <label>첫 결제 예정일</label><input type="date" name="firstDueDate" required>
+    <label>첫 결제 예정일 (직접 지정 시 청구 규칙 대신 적용)</label><input type="date" name="firstDueDate">
+    <p>청구 규칙이 설정된 카드는 첫 결제 예정일을 비우면 자동 계산합니다. 공휴일·주말은 자동 조정하지 않으므로 실제 청구서와 확인하세요.</p>
     <label>예산 카테고리 (온버짓 카드만)</label><select name="categoryId"><option value="">없음</option>${options(categories)}</select>
     <label>메모</label><input name="memo"><button>구매 저장</button></form>` :
     '<p>카드와 비용 계정을 등록해야 구매 내역을 입력할 수 있습니다.</p>';
@@ -748,7 +750,23 @@ function renderCards(book, session, throughDate, message = '') {
     <input type="hidden" name="cardId" value="${escape(card.id)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
     <label>${escape(card.name)} 출금 계좌</label><select name="cashId"><option value="">기본값 해제</option>
     ${options(cash, cardCashDefault(book, session.sub, card.id))}</select><button>기본 계좌 저장</button></form>`).join('')}`;
-  return page('카드 예정액', `${message}${purchase}${defaults}<h2>미결제 할부 예정액</h2>
+  const billing = session.role !== 'owner' ? '' : `<h2>카드별 청구 규칙</h2>
+    <p>마감일 당일 사용분을 포함합니다. 결제 월은 마감 월 기준이며 29~31일이 없는 달은 말일로 계산합니다. 설정 변경은 기존 구매·할부 일정을 바꾸지 않습니다.</p>${cards.map(card => {
+      const rule = cardBillingRule(book, session.sub, card.id);
+      return `<form method="post" action="/admin/cards/billing-rule">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="cardId" value="${escape(card.id)}">
+      <input type="hidden" name="throughDate" value="${escape(throughDate)}"><h3>${escape(card.name)}</h3>
+      <label>이용 마감일 (1~31일)</label><input type="number" name="closingDay" min="1" max="31" value="${rule?.closingDay ?? 15}">
+      <label>결제일 (1~31일)</label><input type="number" name="paymentDay" min="1" max="31" value="${rule?.paymentDay ?? 25}">
+      <label>마감 월 기준 결제 월</label><select name="paymentMonthOffset">${[0, 1, 2].map(n => `<option value="${n}" ${n === (rule?.paymentMonthOffset ?? 0) ? 'selected' : ''}>${['같은 달', '다음 달', '다다음 달'][n]}</option>`).join('')}</select>
+      <p>${rule ? '자동 계산 사용 중' : '설정되지 않음 — 첫 결제 예정일 직접 입력 필요'}</p>
+      <button name="action" value="save">청구 규칙 저장</button><button name="action" value="clear">청구 규칙 해제</button></form>`;
+    }).join('')}`;
+  const previewForm = cards.length ? `<h2>첫 결제 예정일 미리보기</h2><form method="get" action="/admin/cards">
+    <input type="hidden" name="throughDate" value="${escape(throughDate)}">
+    <label>카드</label><select name="previewCardId">${options(cards, preview.cardId)}</select>
+    <label>구매일</label><input type="date" name="purchaseDate" value="${escape(preview.date ?? '')}" required><button>예정일 계산</button></form>` : '';
+  return page('카드 예정액', `${message}${previewForm}${purchase}${defaults}${billing}<h2>미결제 할부 예정액</h2>
     <form method="get" action="/admin/cards"><label>조회 종료일</label>
     <input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
     <table><tr><th>월</th><th>결제 예정액</th></tr>${months}</table>
@@ -1082,7 +1100,28 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
       const throughDate = new URL(req.url, 'http://localhost').searchParams.get('throughDate') ||
         `${Number(today.slice(0, 4)) + 1}-${today.slice(5, 7)}-${today.slice(8, 10)}`;
-      sendHtml(res, 200, renderCards(book, session, throughDate)); return true;
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      let message = ''; let preview = {};
+      if (query.has('previewCardId') || query.has('purchaseDate')) {
+        preview = { cardId: query.get('previewCardId'), date: query.get('purchaseDate') };
+        if (!canAccessAccount(book, session.sub, preview.cardId, 'write') || !book.accounts().get(preview.cardId)?.card) throw new Error('Card write access required');
+        assertDate(preview.date);
+        const rule = cardBillingRule(book, session.sub, preview.cardId);
+        message = rule ? `<p class="notice">첫 결제 예정일: ${escape(firstCardDueDate(preview.date, rule))} (공휴일·주말 조정 없음)</p>` : '<p class="error">청구 규칙을 설정하거나 첫 결제 예정일을 직접 입력하세요.</p>';
+      }
+      sendHtml(res, 200, renderCards(book, session, throughDate, message, preview)); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/cards/billing-rule') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const throughDate = form.get('throughDate'); assertDate(throughDate);
+      if (!['save', 'clear'].includes(form.get('action'))) throw new Error('Invalid billing rule action');
+      if (form.get('action') === 'save' && ['closingDay', 'paymentDay', 'paymentMonthOffset']
+        .some(name => !/^\d{1,2}$/.test(form.get(name) ?? ''))) throw new Error('Complete billing rule required');
+      setCardBillingRule(book, session.sub, form.get('cardId'), form.get('action') === 'clear' ? null : {
+        closingDay: Number(form.get('closingDay')), paymentDay: Number(form.get('paymentDay')),
+        paymentMonthOffset: Number(form.get('paymentMonthOffset')) });
+      sendHtml(res, 200, renderCards(book, session, throughDate, '<p class="notice">카드 청구 규칙을 저장했습니다.</p>')); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/cards/default-cash') {
       const form = await formBody(req);

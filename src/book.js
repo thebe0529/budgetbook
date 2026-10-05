@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import { cardBillingDates, validateBillingRule } from './card-billing.js';
 import { assertDate, assertMonth, validateAccount, validateEntry, balanceSheet, incomeStatement,
   cashFlow, installmentSchedule, budgetSummary } from './ledger.js';
 
@@ -67,6 +68,7 @@ export class Book {
         BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_cash_defaults (card_id TEXT PRIMARY KEY, cash_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS card_billing_rules (card_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_payment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cash_schedules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cash_schedule_links (
@@ -243,18 +245,24 @@ export class Book {
   }
 
   cardPurchase({ id = randomUUID(), date, cardId, expenseId, amount, count, firstDueDate,
-    categoryId, memo = '', createdBy, payloadHash }) {
+    categoryId, memo = '', createdBy, payloadHash, billingRule }) {
     assertDate(date);
     const accounts = this.accounts();
     if (!accounts.get(cardId)?.card || accounts.get(expenseId)?.type !== 'expense') {
       throw new Error('Card purchase requires a card liability and expense account');
     }
     const installments = installmentSchedule(amount, count, firstDueDate);
+    if (billingRule) {
+      billingRule = validateBillingRule(billingRule);
+      const dates = cardBillingDates(firstDueDate, count, billingRule);
+      installments.forEach((item, i) => { item.dueDate = dates[i]; });
+    }
     const entry = { id: `purchase:${id}`, date, memo,
       postings: [{ accountId: expenseId, side: 'debit', amount },
         { accountId: cardId, side: 'credit', amount }],
       ...(categoryId ? { budgetAllocations: [{ categoryId, amount }] } : {}) };
     const plan = { id, purchaseEntryId: entry.id, cardId, installments,
+      ...(billingRule ? { billingRule } : {}),
       ...(createdBy ? { createdBy } : {}), ...(payloadHash ? { payloadHash } : {}) };
     return this.atomic(() => {
       this.record(entry);

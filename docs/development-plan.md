@@ -99,6 +99,20 @@ Actual Budget의 빠른 계좌별 거래 입력, 분할 거래, 온/오프 버�
 - **운영 정책(확정):** 가족 공유, NAS Docker 컨테이너 운영, 신뢰 기기 마지막 온라인 인증 후 30일 오프라인 사용, 매일 1회 기본 백업과 앱 설정에서 주기 변경, Google Drive 선택 연동. DB 엔진·백업 보관 개수·역할별 세부 권한은 구현 단계에서 확정한다.
 - **수식 범위(확정):** 금액 입력 필드에서 사칙연산과 괄호를 계산하여 결과 금액만 저장한다. Excel 함수·셀 참조·자동 재계산은 구현하지 않는다. 따라서 HyperFormula 도입을 전제로 하지 않는다.
 
+## 현재 개발 현황 (2026-10-05)
+
+초기 계획의 기술 스택·수신 경로는 구현 과정에서 변경됐습니다. 현재는 JavaScript/Node.js·SQLite, 서버 관리자 화면과 별도 암호화 PWA를 사용하며 실제 API 계약은 `import-api.md`를 기준으로 합니다.
+
+| 영역 | 구현 완료 | 남은 범위 |
+| --- | --- | --- |
+| 원장·입력 | 복식부기, 단순·분할·이체, 키보드 입력, 복사·수정·취소 이력, 검색·태그·일괄 변경·대사·기간 잠금, 금액 계산 미리보기 | 거래처·첨부, 임의 셀 범위 편집, 자동 분류 규칙, 다른 입력 화면 계산 미리보기 |
+| 예산 | 월 배정·이월·목표 배정·동월 이동·초과 경고·상세 내역 | 온/오프 변경 영향 미리보기, 저축 잔액 목표, 월간 배정 이동, 수입 카테고리 |
+| 카드 | 구매·할부·회차별/묶음 결제, 기본 출금 계좌, 마감일·결제일·결제 월 규칙과 예정일 미리보기 | 주말·공휴일, 수수료, 취소·환불·조기상환·부분납부, 청구서 대사 |
+| 보고서·예측 | 재무상태표·손익·현금흐름 상세, 월별 비교·CSV, 일정·매칭·시뮬레이션, 일괄 조정과 역분개 | Excel 추출, 시점 조정 등 확장 |
+| 외부 수신·이관 | 사용자/계좌 키, 정규식 시험·파싱·중복 방지·승인 | Actual CSV 이관, 출처 간 유사 거래 매칭, 분할·할부 승인, 실제 은행 수집기 연결 |
+| PWA·가족 | 암호화 로컬 최근 내역, 30일 사용, 단순·분할 신규/수정 큐·충돌/잠금 안내, 계좌별 권한 | 전체 장부 동기화, 카드·예산·일정 오프라인, 사용자별 로컬 자료 분리, 독립 장부·개인 계좌 집계 격리, Actual 동기화 재사용 검증 |
+| 운영 | NAS Docker 예시, Pocket ID OIDC 코드, 자동/수동 로컬 백업과 주기·보관 설정 | Drive·암호화·앱 복구, NAS/Pocket ID/iPhone 실환경·동시 수정·복원·성능·접근성 검증 |
+
 ## 참고 문서
 
 - Actual Budget 공식 문서: https://actualbudget.org/docs/vision/ , https://actualbudget.org/docs/faq/ , https://actualbudget.org/docs/accounts/ , https://actualbudget.org/docs/transactions/split-transactions/ , https://actualbudget.org/docs/experimental/formulas/ , https://actualbudget.org/docs/tour/schedules/ , https://actualbudget.org/docs/reports/custom-reports/

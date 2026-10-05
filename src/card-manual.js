@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { calculateAmount } from './amount-expression.js';
 import { assertDate } from './ledger.js';
 import { canAccessAccount, member } from './members.js';
+import { cardBillingRule, firstCardDueDate } from './card-billing.js';
 
 const validId = id => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id);
 const digest = data => createHash('sha256').update(JSON.stringify(data)).digest('hex');
@@ -32,10 +33,15 @@ export function cardCashDefault(book, sub, cardId) {
 }
 
 export function recordCardPurchase(book, userSub, input) {
-  const { requestId, date, cardId, expenseId, firstDueDate, categoryId, memo = '' } = input;
+  const { requestId, date, cardId, expenseId, categoryId, memo = '' } = input;
   if (!validId(requestId)) throw new Error('Valid request ID required');
   if (!canAccessAccount(book, userSub, cardId, 'write')) throw new Error('Card write access required');
   assertDate(date);
+  const previous = book.cardPlan(requestId);
+  const automatic = !input.firstDueDate;
+  const billingRule = automatic ? (previous?.billingRule ?? cardBillingRule(book, userSub, cardId)) : null;
+  if (automatic && !billingRule) throw new Error('Set a card billing rule or enter the first payment date');
+  const firstDueDate = automatic ? firstCardDueDate(date, billingRule) : input.firstDueDate;
   assertDate(firstDueDate);
   if (firstDueDate < date) throw new Error('First payment date precedes purchase');
   if (typeof memo !== 'string' || memo.length > 500) throw new Error('Invalid memo');
@@ -50,9 +56,9 @@ export function recordCardPurchase(book, userSub, input) {
     throw new Error('Invalid budget category');
   }
   const payload = { date, cardId, expenseId, amount, count, firstDueDate,
+    ...(automatic ? { billingRule } : {}),
     categoryId: categoryId || null, memo: memo.trim() };
   const payloadHash = digest(payload);
-  const previous = book.cardPlan(requestId);
   if (previous) {
     if (previous.createdBy !== userSub || previous.payloadHash !== payloadHash) {
       throw new Error('Request ID reused with different card purchase');
@@ -61,7 +67,7 @@ export function recordCardPurchase(book, userSub, input) {
   }
   const plan = book.cardPurchase({ id: requestId, date, cardId, expenseId, amount,
     count, firstDueDate, categoryId: categoryId || null, memo: memo.trim(),
-    createdBy: userSub, payloadHash });
+    createdBy: userSub, payloadHash, billingRule });
   return { plan, duplicate: false };
 }
 
