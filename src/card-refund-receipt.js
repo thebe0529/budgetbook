@@ -13,7 +13,8 @@ export function cardRefundReceiptPreview(book, sub, refundId) {
   const receipts = book.db.prepare('SELECT data FROM card_refund_receipts WHERE refund_id = ? ORDER BY rowid')
     .all(refundId).map(row => JSON.parse(row.data));
   const received = receipts.reduce((sum, receipt) => sum + receipt.amount, 0);
-  return { refund, plan, allowed, received, remaining: refund.amount - received,
+  const receiptLimit = refund.creditAmount ?? refund.amount;
+  return { refund, plan, allowed, received, receiptLimit, remaining: receiptLimit - received,
     minimumDate: [refund.date, ...receipts.map(receipt => receipt.date)].sort().at(-1),
     expectedHash: entryFingerprint({ refund, receipts }),
     receipts: receipts.map(receipt => canAccessAccount(book, sub, receipt.cashId) ? receipt :

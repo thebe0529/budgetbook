@@ -82,12 +82,42 @@ export class Book {
       CREATE TRIGGER IF NOT EXISTS card_receipt_entry_delete BEFORE DELETE ON entries
         WHEN EXISTS (SELECT 1 FROM card_refund_receipts WHERE entry_id = OLD.id)
         BEGIN SELECT RAISE(ABORT, 'Card refund receipt entries cannot be changed'); END;
-      CREATE TRIGGER IF NOT EXISTS refunded_card_plan_update BEFORE UPDATE ON card_plans
+      SAVEPOINT refund_schedule_guard;
+      DROP TRIGGER IF EXISTS refunded_card_plan_update;
+      CREATE TRIGGER refunded_card_plan_update BEFORE UPDATE ON card_plans
         WHEN EXISTS (SELECT 1 FROM card_refunds WHERE plan_id = OLD.id) AND (
-          json_extract(NEW.data, '$.installments') IS NOT json_extract(OLD.data, '$.installments') OR
           json_extract(NEW.data, '$.cardId') IS NOT json_extract(OLD.data, '$.cardId') OR
-          json_extract(NEW.data, '$.purchaseEntryId') IS NOT json_extract(OLD.data, '$.purchaseEntryId'))
+          json_extract(NEW.data, '$.purchaseEntryId') IS NOT json_extract(OLD.data, '$.purchaseEntryId') OR
+          json_array_length(NEW.data, '$.installments') IS NOT json_array_length(OLD.data, '$.installments') OR
+          EXISTS (SELECT 1 FROM json_each(OLD.data, '$.installments') o
+            JOIN json_each(NEW.data, '$.installments') n ON n.key = o.key
+            WHERE json_extract(n.value, '$.index') IS NOT json_extract(o.value, '$.index') OR
+              json_extract(n.value, '$.dueDate') IS NOT json_extract(o.value, '$.dueDate') OR
+              json_extract(n.value, '$.amount') IS NOT COALESCE(
+                (SELECT json_extract(data, '$.afterInstallments[' || o.key || '].amount')
+                 FROM card_refunds WHERE plan_id = OLD.id ORDER BY rowid DESC LIMIT 1), json_extract(o.value, '$.amount')) OR
+              (json_extract(o.value, '$.paidEntryId') IS NOT NULL AND n.value IS NOT o.value) OR
+              (json_extract(o.value, '$.paidEntryId') IS NULL AND json_extract(n.value, '$.paidEntryId') IS NOT NULL AND
+                NOT EXISTS (SELECT 1 FROM entries e WHERE e.id = json_extract(n.value, '$.paidEntryId') AND
+                  e.id = 'payment:' || OLD.id || ':' || json_extract(n.value, '$.index') AND
+                  json_extract(e.data, '$.kind') = 'card-payment' AND e.date >= json_extract(NEW.data, '$.lastRefundDate') AND
+                  json_extract(n.value, '$.amount') > 0 AND json_array_length(e.data, '$.postings') = 2 AND
+                  json_extract(e.data, '$.postings[0].accountId') = json_extract(OLD.data, '$.cardId') AND
+                  json_extract(e.data, '$.postings[0].side') = 'debit' AND json_extract(e.data, '$.postings[1].side') = 'credit' AND
+                  json_extract(e.data, '$.postings[0].amount') = json_extract(n.value, '$.amount') AND
+                  json_extract(e.data, '$.postings[1].amount') = json_extract(n.value, '$.amount') AND
+                  EXISTS (SELECT 1 FROM accounts a WHERE a.id = json_extract(e.data, '$.postings[1].accountId') AND
+                    json_extract(a.data, '$.type') = 'asset' AND json_extract(a.data, '$.cash') = 1)))))
         BEGIN SELECT RAISE(ABORT, 'Refunded card payment schedule cannot be changed'); END;
+      RELEASE refund_schedule_guard;
+      CREATE TRIGGER IF NOT EXISTS refunded_future_payment_update BEFORE UPDATE ON entries
+        WHEN EXISTS (SELECT 1 FROM card_plans p JOIN card_refunds r ON r.plan_id = p.id
+          JOIN json_each(p.data, '$.installments') i WHERE json_extract(i.value, '$.paidEntryId') = OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'Refunded card entries cannot be changed'); END;
+      CREATE TRIGGER IF NOT EXISTS refunded_future_payment_delete BEFORE DELETE ON entries
+        WHEN EXISTS (SELECT 1 FROM card_plans p JOIN card_refunds r ON r.plan_id = p.id
+          JOIN json_each(p.data, '$.installments') i WHERE json_extract(i.value, '$.paidEntryId') = OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'Refunded card entries cannot be changed'); END;
       CREATE TRIGGER IF NOT EXISTS refunded_card_plan_delete BEFORE DELETE ON card_plans
         WHEN EXISTS (SELECT 1 FROM card_refunds WHERE plan_id = OLD.id)
         BEGIN SELECT RAISE(ABORT, 'Refunded card plans cannot be changed'); END;
@@ -349,6 +379,7 @@ export class Book {
         if (!installment || installment.paidEntryId || installment.amount <= 0) throw new Error('Unknown, zero or already paid installment');
         if (expectedAmount !== undefined && expectedAmount !== installment.amount) throw new Error('Installment amount changed; reload before paying');
         if (plan.lastPartialDate && date < plan.lastPartialDate) throw new Error('Payment date precedes latest partial cancellation');
+        if (plan.lastRefundDate && date < plan.lastRefundDate) throw new Error('Payment date precedes latest refund');
         const entry = { id: `payment:${planId}:${index}`, date, kind: 'card-payment',
           postings: [{ accountId: plan.cardId, side: 'debit', amount: installment.amount },
             { accountId: cashId, side: 'credit', amount: installment.amount }] };

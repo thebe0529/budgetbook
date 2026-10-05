@@ -709,22 +709,24 @@ function renderBudgetCategoryActivity(book, session, month, categoryId, options)
 }
 
 function renderCardCancellation(book, session, planId, message = '') {
-  const { plan, entry, allowed, hasPayments, expectedHash, cancellation, partials, remainingAmount, refunds, fullyPaid, minimumRefundDate } = cardCancellationPreview(book, session.sub, planId);
+  const { plan, entry, allowed, hasPayments, expectedHash, cancellation, partials, remainingAmount, refunds, unpaidAmount, minimumRefundDate } = cardCancellationPreview(book, session.sub, planId);
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   const amount = entry.postings.filter(p => p.accountId === plan.cardId && p.side === 'credit').reduce((sum, p) => sum + p.amount, 0);
   const minimumDate = plan.lastPartialDate ?? entry.date;
-  const refundForm = !allowed ? '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 환불을 기록할 수 있습니다.</p>' : remainingAmount <= 0 ? '<p class="notice">구매 금액 전액을 환불했습니다.</p>' : `<h2>납부 완료 구매 환불 (카드대금 차감)</h2>
+  const refundForm = !allowed ? '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 환불을 기록할 수 있습니다.</p>' : remainingAmount <= 0 ? '<p class="notice">구매 금액 전액을 환불했습니다.</p>' : `<h2>납부 이력이 있는 구매 취소·환불</h2>
     <p>현금 입금을 기록하지 않습니다. 환불을 카드 잔액에 차감하며 잔액이 음수가 되면 카드사 환급 대기 또는 다음 청구 차감액을 뜻합니다. 실제 은행 입금은 아래 환불 이력의 계좌 입금 기록에서 별도로 처리하세요.</p>
+    ${unpaidAmount > 0 ? `<p>현재 미납 예정액은 ${unpaidAmount.toLocaleString('ko-KR')}원입니다. 환불액은 이 금액을 먼저 줄이고, 초과분만 카드대금 차감·계좌 입금 기록 대상이 됩니다. 남은 예정액은 미납 회차에 균등 배분하며 원 단위 나머지는 앞 회차에 더합니다. 납부한 회차와 모든 예정일은 보존합니다. 카드사의 실제 취소 배분과 일치하는지 확인하세요.</p>` : ''}
     <form method="post" action="/admin/cards/refund">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="planId" value="${escape(plan.id)}">
     <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
     <label>환불일 (최근 납부·환불일 이후)</label><input type="date" name="date" min="${escape(minimumRefundDate)}" value="${today < minimumRefundDate ? minimumRefundDate : today}" required>
     <label>환불 금액 (사칙연산 가능, 전액·일부)</label><input name="amountExpression" maxlength="256" required>
-    <label>환불 사유</label><input name="reason" maxlength="200" required><button>카드대금 차감 환불 기록</button></form>`;
+    <label>환불 사유</label><input name="reason" maxlength="200" required>
+    ${unpaidAmount > 0 ? '<label><input type="checkbox" name="confirmUnpaidFirst" value="true" style="width:auto" required>미납 예정액을 먼저 줄이는 방식이 실제 카드 취소·환불과 일치함을 확인했습니다.</label>' : ''}
+    <button>카드 취소·환불 기록</button></form>`;
   const state = cancellation ? `<h2>취소 이력</h2>
     <p>취소일: ${escape(cancellation.date)} · 취소자: ${escape(cancellation.actor)} · 처리 시각: ${escape(cancellation.createdAt)} (UTC)</p>
-    <p>사유: ${escape(cancellation.reason)} · 취소 금액: ${(cancellation.amount ?? amount).toLocaleString('ko-KR')}원</p><p>취소 분개: ${escape(cancellation.reversalId)}</p>` : fullyPaid ? refundForm : hasPayments ?
-    '<p class="notice">일부 회차만 납부한 구매입니다. 미결제 취소와 납부 완료 환불의 대상이 아니며 혼합 처리는 후속 기능입니다.</p>' : !allowed ?
+    <p>사유: ${escape(cancellation.reason)} · 취소 금액: ${(cancellation.amount ?? amount).toLocaleString('ko-KR')}원</p><p>취소 분개: ${escape(cancellation.reversalId)}</p>` : hasPayments ? refundForm : !allowed ?
     '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 취소할 수 있습니다.</p>' : `<form method="post" action="/admin/cards/cancel">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="planId" value="${escape(plan.id)}">
     <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
@@ -738,15 +740,16 @@ function renderCardCancellation(book, session, planId, message = '') {
     <label>취소 금액 (사칙연산 가능)</label><input name="amountExpression" maxlength="256" required>
     <label>취소 사유</label><input name="reason" maxlength="200" required><button>미결제 구매 부분취소</button></form>`;
   const partialHistory = partials.length ? `<h2>부분취소 이력</h2><table><tr><th>취소일</th><th>금액</th><th>사유</th><th>작업자·UTC 시각</th><th>취소 분개</th></tr>${partials.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원</td><td>${escape(a.reason)}</td><td>${escape(a.actor)} · ${escape(a.createdAt)}</td><td>${escape(a.entryId)}</td></tr>`).join('')}</table>` : '';
-  const refundHistory = refunds.length ? `<h2>카드대금 차감 환불 이력</h2><table><tr><th>환불일</th><th>금액</th><th>사유</th><th>작업자·UTC 시각</th><th>환불 분개</th><th>계좌 입금</th></tr>${refunds.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원</td><td>${escape(a.reason)}</td><td>${escape(a.actor)} · ${escape(a.createdAt)}</td><td>${escape(a.entryId)}</td><td><a href="/admin/cards/refund-receipt?refundId=${encodeURIComponent(a.requestId)}">입금 기록·이력</a></td></tr>`).join('')}</table>` : '';
+  const refundHistory = refunds.length ? `<h2>카드대금 차감 환불 이력</h2><table><tr><th>환불일</th><th>금액·배분</th><th>사유</th><th>작업자·UTC 시각</th><th>환불 분개</th><th>계좌 입금</th></tr>${refunds.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원<br>미납 감소 ${(a.unpaidReduction ?? 0).toLocaleString('ko-KR')}원 / 카드대금 차감 ${(a.creditAmount ?? a.amount).toLocaleString('ko-KR')}원
+      ${a.afterInstallments ? `<details><summary>회차별 변경</summary>${a.afterInstallments.map((item, i) => `<p>${item.index}회차 · ${escape(item.dueDate)} · ${a.beforeInstallments[i].amount.toLocaleString('ko-KR')}원 → ${item.amount.toLocaleString('ko-KR')}원${item.paidEntryId ? ' (납부 보존)' : ''}</p>`).join('')}</details>` : ''}</td><td>${escape(a.reason)}</td><td>${escape(a.actor)} · ${escape(a.createdAt)}</td><td>${escape(a.entryId)}</td><td><a href="/admin/cards/refund-receipt?refundId=${encodeURIComponent(a.requestId)}">입금 기록·이력</a></td></tr>`).join('')}</table>` : '';
   return page('카드 구매 취소·환불', `${message}<p>카드: ${escape(book.accounts().get(plan.cardId).name)} · 구매일: ${escape(entry.date)} · 최초 금액: ${amount.toLocaleString('ko-KR')}원 · 취소·환불 후 남은 구매 금액: ${remainingAmount.toLocaleString('ko-KR')}원 · ${plan.installments.length}회차</p>
-    <p>메모: ${escape(entry.memo ?? '')}</p><p>원거래를 보존하고 취소일에 반대 분개를 기록합니다. 비용과 예산은 취소일이 속한 달에 되돌리며 전체 취소는 모든 미결제 예정액을 제외하고 부분취소는 남은 금액으로 예정액을 다시 계산합니다. 취소일이 계좌 잠금 기간이면 저장할 수 없습니다. 전 회차 납부가 완료된 구매는 카드대금 차감 환불을 기록할 수 있습니다. 환불 이력에서 실제 계좌 입금을 별도로 기록할 수 있습니다. 일부 납부 구매의 혼합 취소·환불은 후속 범위입니다.</p>
+    <p>메모: ${escape(entry.memo ?? '')}</p><p>원거래를 보존하고 취소일에 반대 분개를 기록합니다. 비용과 예산은 취소일이 속한 달에 되돌리며 전체 취소는 모든 미결제 예정액을 제외하고 부분취소는 남은 금액으로 예정액을 다시 계산합니다. 취소일이 계좌 잠금 기간이면 저장할 수 없습니다. 일부 또는 전 회차를 납부한 구매도 환불을 기록할 수 있습니다. 환불 이력에서 실제 계좌 입금을 별도로 기록할 수 있습니다.</p>
     ${state}${partialHistory}${refundHistory}<p><a href="/admin/register?accountId=${encodeURIComponent(plan.cardId)}">카드 원장</a> · <a href="/admin/cards">카드 예정액으로 돌아가기</a></p>`);
 }
 
 function renderCardRefundReceipt(book, session, refundId, message = '') {
   const preview = cardRefundReceiptPreview(book, session.sub, refundId);
-  const { refund, plan, allowed, receipts, received, remaining, minimumDate, expectedHash } = preview;
+  const { refund, plan, allowed, receipts, received, receiptLimit, remaining, minimumDate, expectedHash } = preview;
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
   const accounts = book.accounts();
   const cash = [...accounts.values()].filter(a => a.type === 'asset' && a.cash && canAccessAccount(book, session.sub, a.id, 'write'));
@@ -764,7 +767,7 @@ function renderCardRefundReceipt(book, session, refundId, message = '') {
       <label><input type="checkbox" name="confirmed" value="true" style="width:auto" required>이 거래가 해당 카드 환불금의 실제 입금임을 확인했습니다.</label><button>기존 입금 연결</button></form>`).join('')}` :
     allowed && remaining > 0 ? '<p>연결 가능한 기존 입금이 없습니다. 같은 카드의 대변과 현금성 자산의 차변으로만 구성된 두 행 거래를 연결할 수 있습니다. 금액·입금일·쓰기 권한도 확인합니다.</p>' : '';
   const form = !allowed ? '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 입금을 기록할 수 있습니다.</p>' : remaining <= 0 ?
-    '<p class="notice">이 환불의 전액을 계좌 입금으로 기록했습니다.</p>' : !cash.length ? '<p>쓰기 가능한 현금성 자산 계좌가 필요합니다.</p>' : `<h2>실제 계좌 입금 기록</h2>
+    receiptLimit === 0 ? '<p class="notice">미납 예정액 감소만 처리한 환불입니다. 별도 계좌 입금 기록 대상이 없습니다.</p>' : '<p class="notice">이 환불의 전액을 계좌 입금으로 기록했습니다.</p>' : !cash.length ? '<p>쓰기 가능한 현금성 자산 계좌가 필요합니다.</p>' : `<h2>실제 계좌 입금 기록</h2>
     <form method="post" action="/admin/cards/refund-receipt">
     <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="refundId" value="${escape(refundId)}">
     <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
@@ -774,7 +777,7 @@ function renderCardRefundReceipt(book, session, refundId, message = '') {
     <label>입금 메모</label><input name="reason" maxlength="200" required>
     <label><input type="checkbox" name="confirmed" value="true" style="width:auto" required>실제 입금을 확인했으며 이미 기록한 입금과 중복되지 않습니다.</label><button>환불금 계좌 입금 저장</button></form>`;
   return page('카드 환불금 계좌 입금', `${message}<p>카드: ${escape(accounts.get(plan.cardId).name)} · 환불일: ${escape(refund.date)} · 사유: ${escape(refund.reason)}</p>
-    <p>환불액 ${refund.amount.toLocaleString('ko-KR')}원 · 기록한 계좌 입금 ${received.toLocaleString('ko-KR')}원 · 추가 입금 기록 한도 ${remaining.toLocaleString('ko-KR')}원</p>
+    <p>전체 환불액 ${refund.amount.toLocaleString('ko-KR')}원 · 계좌 입금 기록 대상 ${receiptLimit.toLocaleString('ko-KR')}원 · 기록한 계좌 입금 ${received.toLocaleString('ko-KR')}원 · 추가 입금 기록 한도 ${remaining.toLocaleString('ko-KR')}원</p>
     <p>실제로 은행 계좌에 받은 환불금만 기록하세요. 다음 카드 청구 차감으로 사용한 금액은 여기에 입금으로 기록하지 않습니다. 은행 자산 증가와 카드 잔액 조정만 기록하며 비용·예산을 다시 되돌리지 않습니다. 이미 원장에 기록한 같은 입금은 아래 기존 입금 연결을 사용하세요. 수입·비용 거래는 자동 재분류하지 않으며 한 거래를 여러 환불에 나눠 연결할 수 없습니다.</p>
     ${links}${form}<h2>계좌 입금 이력</h2><table><tr><th>입금일</th><th>금액</th><th>입금 계좌</th><th>메모</th><th>작업자·시각</th><th>기록 방식·거래</th></tr>${rows || '<tr><td colspan="6">입금 기록이 없습니다.</td></tr>'}</table>
     <p><a href="/admin/cards/cancel?planId=${encodeURIComponent(plan.id)}">구매 취소·환불 이력으로 돌아가기</a></p>`);
@@ -1223,9 +1226,10 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const form = await formBody(req);
       if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
       const result = refundPaidCardPurchase(book, session.sub, { planId: form.get('planId'), date: form.get('date'),
-        reason: form.get('reason'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId'), amountExpression: form.get('amountExpression') });
+        reason: form.get('reason'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId'), amountExpression: form.get('amountExpression'),
+        confirmUnpaidFirst: form.get('confirmUnpaidFirst') === 'true' });
       sendHtml(res, 200, renderCardCancellation(book, session, form.get('planId'),
-        `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 카드대금 차감 환불입니다.</p>`)); return true;
+        `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 카드 취소·환불입니다.</p>`)); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/cards/cancel-partial') {
       const form = await formBody(req);

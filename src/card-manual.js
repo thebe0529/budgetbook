@@ -90,7 +90,7 @@ export function recordCardPayment(book, userSub, input) {
     throw new Error('Card and cash account write access required');
   }
   if (!Number.isSafeInteger(index) || index < 1) throw new Error('Invalid installment index');
-  if (plan.lastPartialDate && input.expectedAmount === undefined) throw new Error('Reload the partially cancelled purchase before paying');
+  if ((plan.lastPartialDate || plan.lastRefundDate) && input.expectedAmount === undefined) throw new Error('Reload the cancelled or refunded purchase before paying');
   return book.payInstallment({ planId, index, date, cashId, expectedAmount: input.expectedAmount });
 }
 
@@ -102,7 +102,8 @@ export function recordCardPaymentBatch(book, userSub, { requestId, items, date, 
     const plan = book.cardPlan(item?.planId);
     if (!plan || !canAccessAccount(book, userSub, plan.cardId, 'write')) throw new Error('Card write access required');
     if (!Number.isSafeInteger(item.index) || item.index < 1) throw new Error('Invalid installment index');
-    if (plan.lastPartialDate && item.expectedAmount === undefined) throw new Error('Reload the partially cancelled purchase before paying');
+    if ((plan.lastPartialDate || (plan.lastRefundDate && !plan.installments.find(i => i.index === item.index)?.paidEntryId)) &&
+      item.expectedAmount === undefined) throw new Error('Reload the cancelled or refunded purchase before paying');
     return { planId: item.planId, index: item.index,
       ...(item.expectedAmount === undefined ? {} : { expectedAmount: item.expectedAmount }) };
   }).sort((a, b) => a.planId.localeCompare(b.planId) || a.index - b.index);

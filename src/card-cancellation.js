@@ -26,6 +26,7 @@ export function cardCancellationPreview(book, sub, planId) {
   const fullyPaid = payments.length > 0 && plan.installments.every(item => item.amount === 0 || item.paidEntryId);
   const minimumRefundDate = [entry.date, plan.lastPartialDate, plan.lastRefundDate, ...payments.map(p => p.date)].filter(Boolean).sort().at(-1);
   return { plan, entry, allowed, hasPayments: plan.installments.some(item => item.paidEntryId),
+    unpaidAmount: plan.installments.filter(item => !item.paidEntryId).reduce((sum, item) => sum + item.amount, 0),
     partials, refunds, fullyPaid, payments, minimumRefundDate,
     remainingAmount: plan.cancellationId ? 0 : plan.installments.reduce((sum, item) => sum + item.amount, 0) - (plan.refundedAmount ?? 0),
     expectedHash: entryFingerprint({ plan, entry, ...(payments.length ? { payments } : {}) }), cancellation: saved ? JSON.parse(saved.data) : null };
