@@ -52,6 +52,7 @@ export function cancelCardPurchase(book, sub, { planId, date, reason, expectedHa
   return book.atomic(() => {
     const { plan, entry: original, allowed, hasPayments, cancellation, expectedHash: currentHash } = cardCancellationPreview(book, sub, planId);
     if (!allowed) throw new Error('Card purchase cancellation requires author or owner and write access');
+    if (book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     if (book.db.prepare('SELECT 1 FROM card_refunds WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     if (book.db.prepare('SELECT 1 FROM card_partial_cancellations WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     const sent = book.db.prepare('SELECT data FROM transaction_reversals WHERE request_id = ?').get(requestId);
@@ -97,6 +98,7 @@ export function partiallyCancelCardPurchase(book, sub, { planId, date, reason, e
     const preview = cardCancellationPreview(book, sub, planId);
     const { plan, entry: original, allowed, hasPayments, remainingAmount, cancellation } = preview;
     if (!allowed) throw new Error('Card purchase cancellation requires author or owner and write access');
+    if (book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     if (book.db.prepare('SELECT 1 FROM card_refunds WHERE id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     if (book.db.prepare('SELECT 1 FROM transaction_reversals WHERE request_id = ?').get(requestId)) throw new Error('Cancellation request ID reused');
     const sent = book.db.prepare('SELECT data FROM card_partial_cancellations WHERE id = ?').get(requestId);

@@ -14,6 +14,7 @@ export function refundPaidCardPurchase(book, sub, { planId, date, reason, expect
     const preview = cardCancellationPreview(book, sub, planId);
     const { plan, entry: original, allowed, fullyPaid, payments, remainingAmount, minimumRefundDate } = preview;
     if (!allowed) throw new Error('Card refund requires author or owner and write access');
+    if (book.db.prepare('SELECT 1 FROM card_refund_receipts WHERE id = ?').get(requestId)) throw new Error('Refund request ID reused');
     if (book.db.prepare('SELECT 1 FROM transaction_reversals WHERE request_id = ?').get(requestId) ||
       book.db.prepare('SELECT 1 FROM card_partial_cancellations WHERE id = ?').get(requestId)) throw new Error('Refund request ID reused');
     const sent = book.db.prepare('SELECT data FROM card_refunds WHERE id = ?').get(requestId);

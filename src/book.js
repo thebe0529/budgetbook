@@ -73,6 +73,15 @@ export class Book {
       CREATE TABLE IF NOT EXISTS card_refunds (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL,
         original_id TEXT NOT NULL, entry_id TEXT NOT NULL UNIQUE, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS card_refund_plan ON card_refunds(plan_id);
+      CREATE TABLE IF NOT EXISTS card_refund_receipts (id TEXT PRIMARY KEY, refund_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL UNIQUE, date TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS card_receipt_refund ON card_refund_receipts(refund_id);
+      CREATE TRIGGER IF NOT EXISTS card_receipt_entry_update BEFORE UPDATE ON entries
+        WHEN EXISTS (SELECT 1 FROM card_refund_receipts WHERE entry_id = OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'Card refund receipt entries cannot be changed'); END;
+      CREATE TRIGGER IF NOT EXISTS card_receipt_entry_delete BEFORE DELETE ON entries
+        WHEN EXISTS (SELECT 1 FROM card_refund_receipts WHERE entry_id = OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'Card refund receipt entries cannot be changed'); END;
       CREATE TRIGGER IF NOT EXISTS refunded_card_plan_update BEFORE UPDATE ON card_plans
         WHEN EXISTS (SELECT 1 FROM card_refunds WHERE plan_id = OLD.id) AND (
           json_extract(NEW.data, '$.installments') IS NOT json_extract(OLD.data, '$.installments') OR
