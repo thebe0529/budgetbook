@@ -92,7 +92,7 @@ function renderAccounts(book, session, message = '') {
     <tbody>${rows}</tbody></table>${controls}`);
 }
 
-function renderRegister(book, session, accountId, message = '', filters = registerFilters(new URLSearchParams())) {
+function renderRegister(book, session, accountId, message = '', filters = registerFilters(new URLSearchParams()), entryDefaults = null) {
   const accounts = visibleAccounts(book, session.sub).filter(a => ['asset', 'liability'].includes(a.type));
   if (accountId && !accounts.some(a => a.id === accountId)) throw new Error('Account access denied');
   const selected = accounts.find(a => a.id === accountId) ?? accounts[0];
@@ -100,23 +100,29 @@ function renderRegister(book, session, accountId, message = '', filters = regist
   const register = accountRegister(book, session.sub, selected.id, '9999-12-31');
   const periodLock = accountPeriodLock(book, session.sub, selected.id);
   const options = accounts.map(a => `<option value="${escape(a.id)}"${a.id === selected.id ? ' selected' : ''}>${escape(a.name)}</option>`).join('');
-  const counters = [...book.accounts().values()].filter(a => ['income', 'expense', 'equity'].includes(a.type) ||
-    (['asset', 'liability'].includes(a.type) && canAccessAccount(book, session.sub, a.id, 'write')))
-    .map(a => `<option value="${escape(a.id)}">${escape(a.name)} (${a.type})</option>`).join('');
+  const entryKind = entryDefaults?.kind ?? 'expense';
+  const counterAccounts = [...book.accounts().values()].filter(a => a.id !== selected.id && (['income', 'expense', 'equity'].includes(a.type) ||
+    (['asset', 'liability'].includes(a.type) && canAccessAccount(book, session.sub, a.id, 'write'))));
+  const defaultCounter = entryDefaults?.counterId ?? counterAccounts.find(a => a.type === 'expense')?.id;
+  const counters = counterAccounts.map(a => `<option value="${escape(a.id)}" data-counter-type="${a.type}"${a.id === defaultCounter ? ' selected' : ''}>${escape(a.name)} (${a.type})</option>`).join('');
   const categories = [...book.budgetCategories().values()].map(c =>
     `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
   const input = !canAccessAccount(book, session.sub, selected.id, 'write') ?
-    '<p>읽기 권한만 있습니다.</p>' : `<h2>거래 추가</h2><form method="post" action="/admin/transactions">
+    '<p>읽기 권한만 있습니다.</p>' : `<h2>거래 추가</h2><p>금액에서 Enter를 누르면 메모로 이동하고, 메모에서 Enter 또는 입력 폼 안에서 Ctrl/⌘+Enter를 누르면 저장합니다. Tab으로 모든 입력 칸을 이동할 수 있습니다.</p>
+    <form data-manual-entry data-on-budget="${Boolean(selected.onBudget)}" data-focus-after-save="${Boolean(entryDefaults?.continueEntry)}" method="post" action="/admin/transactions">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="accountId" value="${escape(selected.id)}">
       <input type="hidden" name="requestId" value="${randomUUID()}">
-      <label>일자</label><input type="date" name="date" required>
-      <label>유형</label><select name="kind"><option value="expense">지출</option><option value="income">수입</option>
-        <option value="transfer">이체·카드 결제</option>${session.role === 'owner' ? '<option value="opening">기초 잔액</option>' : ''}</select>
-      <label>상대 계정</label><select name="counterId">${counters}</select>
+      <label>일자</label><input type="date" name="date" value="${escape(entryDefaults?.date ?? new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' }))}" required>
+      <label>유형</label><select name="kind">${[['expense', '지출'], ['income', '수입'], ['transfer', '이체·카드 결제'],
+        ...(session.role === 'owner' ? [['opening', '기초 잔액']] : [])].map(([value, label]) => `<option value="${value}"${entryKind === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
+      <label>상대 계정</label><select name="counterId" required>${counters}</select>
       <label>금액 (사칙연산 가능)</label><input name="amountExpression" required placeholder="10000+2500*2">
-      <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${categories}</select>
-      <label>메모</label><input name="memo"><button>거래 저장</button></form>
+      <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${[...book.budgetCategories().values()].map(c => `<option value="${escape(c.id)}"${c.id === entryDefaults?.categoryId ? ' selected' : ''}>${escape(c.name)}</option>`).join('')}</select>
+      <label>메모</label><input name="memo" maxlength="500">
+      <label><input type="checkbox" name="continueEntry" value="true"${entryDefaults?.continueEntry !== false ? ' checked' : ''} style="width:auto">저장 후 입력 조건을 유지하고 계속 입력</label>
+      <p>계속 입력에서는 날짜·유형·상대 계정·예산을 유지하고 금액과 메모는 비웁니다.</p><button type="submit">거래 저장</button></form>
+      <script type="module" src="/admin/assets/manual-entry-ui.js"></script>
       <p><a href="/admin/split?accountId=${encodeURIComponent(selected.id)}">여러 행으로 분할 거래 입력</a></p>`;
   const { status } = filters;
   const writable = canAccessAccount(book, session.sub, selected.id, 'write');
@@ -1121,7 +1127,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         '<p class="notice">카드 거래를 기록했습니다.</p>'));
       return true;
     }
-    if (req.method === 'GET' && ['/admin/assets/split.js', '/admin/assets/split-paste.js',
+    if (req.method === 'GET' && ['/admin/assets/manual-entry-ui.js', '/admin/assets/split.js', '/admin/assets/split-paste.js',
       '/admin/assets/amount-expression.js'].includes(pathname)) {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8',
         'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
@@ -1436,7 +1442,9 @@ export async function handleAdmin(book, auth, req, res, pathname) {
           requestId: form.get('requestId'),
         });
         sendHtml(res, 200, renderRegister(book, session, form.get('accountId'),
-          `<p class="notice">${result.duplicate ? '이미 저장된' : '저장한'} 거래: ${escape(result.entry.id)}</p>`));
+          `<p class="notice">${result.duplicate ? '이미 저장된' : '저장한'} 거래: ${escape(result.entry.id)}</p>`, registerFilters(new URLSearchParams()),
+          { continueEntry: form.get('continueEntry') === 'true', ...(form.get('continueEntry') === 'true' ?
+            { date: form.get('date'), kind: form.get('kind'), counterId: form.get('counterId'), categoryId: form.get('categoryId') } : {}) }));
         return true;
       }
       if (session.role !== 'owner') throw new Error('Owner access required');
