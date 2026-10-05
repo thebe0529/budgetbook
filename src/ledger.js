@@ -119,8 +119,9 @@ export function assertMonth(month) {
 
 export function budgetSummary(accounts, entries, categories, allocations, throughMonth) {
   assertMonth(throughMonth);
-  const throughDate = `${throughMonth}-${new Date(Date.UTC(Number(throughMonth.slice(0, 4)),
-    Number(throughMonth.slice(5, 7)), 0)).getUTCDate()}`;
+  const monthEnd = new Date(`${throughMonth}-01T00:00:00Z`);
+  monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1, 0);
+  const throughDate = `${throughMonth}-${String(monthEnd.getUTCDate()).padStart(2, '0')}`;
   const accountBalances = balances(accounts, entries, throughDate);
   const availableFunds = [...accounts.values()].filter(a => a.onBudget &&
     ['asset', 'liability'].includes(a.type)).reduce((n, a) => n +

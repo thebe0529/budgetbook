@@ -18,6 +18,7 @@ import { monthlyComparison, monthlyComparisonCsv, monthlyComparisonOptions, mont
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
+import { budgetOverspending, budgetCategoryActivity, budgetCategoryActivityCsv } from './budget-alerts.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage, registerSortOptions } from './register-view.js';
 import { compareStatement, completeStatementReview, saveStatementComparison, statementComparisonHistory } from './statement-comparison.js';
@@ -607,7 +608,8 @@ function renderAdjustmentDetail(book, session, id) {
 function renderBudget(book, session, month, message = '') {
   assertMonth(month);
   if (session.role !== 'owner') throw new Error('Owner access required');
-  const budget = book.budget(month);
+  const alerts = budgetOverspending(book, session.sub, month);
+  const { budget } = alerts;
   const preview = previousBudgetPreview(book, session.sub, month);
   const targetPreview = budgetTargetPreview(book, session.sub, month);
   const targets = new Map(targetPreview.rows.map(row => [row.categoryId, row]));
@@ -617,10 +619,15 @@ function renderBudget(book, session, month, message = '') {
     <td>${escape(categories.get(move.payload.fromCategoryId)?.name ?? move.payload.fromCategoryId)}</td>
     <td>${escape(categories.get(move.payload.toCategoryId)?.name ?? move.payload.toCategoryId)}</td>
     <td>${move.payload.amount.toLocaleString('ko-KR')}</td></tr>`).join('');
-  const rows = Object.values(budget.categories).map(category => `<tr><td>${escape(category.name)}</td>
+  const categoryLink = categoryId => `/admin/budget/category?${escape(new URLSearchParams({ month, categoryId }).toString())}`;
+  const warnings = alerts.categories.length ? `<section class="error" aria-label="예산 초과 경고"><h2>예산 초과 ${alerts.categories.length}개 · 총 ${alerts.deficit.toLocaleString('ko-KR')}원</h2>
+    <p>이월을 포함한 남은 예산이 음수인 항목입니다. 다른 카테고리의 잔액으로 초과 금액을 상계하지 않습니다. 이전 달의 부족액이 이월된 경우도 포함합니다.</p>
+    <ul>${alerts.categories.map(category => `<li><a href="${categoryLink(category.categoryId)}">${escape(category.name)}</a>: ${category.deficit.toLocaleString('ko-KR')}원 초과</li>`).join('')}</ul>
+    <p><a href="#budget-move">카테고리 간 예산 이동</a> 또는 월 배정 변경으로 조정할 수 있습니다. 자동으로 예산을 이동하지 않습니다.</p></section>` : '<p class="notice">이월 포함 잔액이 음수인 예산 카테고리가 없습니다.</p>';
+  const rows = Object.values(budget.categories).map(category => `<tr${category.balance < 0 ? ' class="error"' : ''}><td><a href="${categoryLink(category.categoryId)}">${escape(category.name)}</a></td>
     <td>${category.budgeted.toLocaleString('ko-KR')}</td>
     <td>${category.spent.toLocaleString('ko-KR')}</td>
-    <td>${category.balance.toLocaleString('ko-KR')}</td>
+    <td>${category.balance.toLocaleString('ko-KR')}${category.balance < 0 ? `<br><strong>${(-category.balance).toLocaleString('ko-KR')}원 초과</strong>` : ''}</td>
     <td><form method="post" action="/admin/budget"><input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="month" value="${escape(month)}">
       <input type="hidden" name="categoryId" value="${escape(category.categoryId)}">
@@ -634,6 +641,8 @@ function renderBudget(book, session, month, message = '') {
     <label>월</label><input type="month" name="month" value="${escape(month)}"><button>조회</button></form>
     <p>온버짓 가용 자금: ${budget.availableFunds.toLocaleString('ko-KR')}원 ·
       미배정 자금: ${budget.readyToAssign.toLocaleString('ko-KR')}원</p>
+    ${alerts.overAssigned ? `<p class="error">가용 자금보다 ${alerts.overAssigned.toLocaleString('ko-KR')}원 더 배정되어 있습니다. 카테고리 초과 지출과는 별도의 경고입니다.</p>` : ''}
+    ${warnings}<p>카테고리명을 누르면 해당 월 예산 지출 내역을 확인할 수 있습니다.</p>
     <form method="post" action="/admin/budget/copy-previous">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
       <p>${escape(preview.fromMonth ?? '이전 달 없음')} 배정액에서 아직 입력하지 않은 ${preview.rows.length}항목,
@@ -646,7 +655,7 @@ function renderBudget(book, session, month, message = '') {
       <input type="hidden" name="requestId" value="${randomUUID()}">
       <p>목표 부족액 합계 ${targetPreview.total.toLocaleString('ko-KR')}원 · 채운 후 미배정 자금 ${(budget.readyToAssign - targetPreview.total).toLocaleString('ko-KR')}원</p>
       <button ${targetPreview.total > 0 ? '' : 'disabled'}>이번 달 목표 부족액 채우기</button></form>
-    <h2>카테고리 간 예산 이동</h2><p>이번 달 배정액 안에서 이동합니다. 총 배정액은 유지하며, 지출과 이월액은 이동하지 않습니다.</p>
+    <h2 id="budget-move">카테고리 간 예산 이동</h2><p>이번 달 배정액 안에서 이동합니다. 총 배정액은 유지하며, 지출과 이월액은 이동하지 않습니다.</p>
     <form method="post" action="/admin/budget/move">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
       <input type="hidden" name="requestId" value="${randomUUID()}">
@@ -655,6 +664,22 @@ function renderBudget(book, session, month, message = '') {
       <label>이동 금액 (사칙연산 가능)</label><input name="amountExpression" required>
       <button ${categories.size < 2 ? 'disabled' : ''}>예산 이동</button></form>
     <h2>이번 달 최근 이동 기록</h2><table><tr><th>저장 시각 (UTC)</th><th>보내는 항목</th><th>받는 항목</th><th>금액</th></tr>${moves}</table>`);
+}
+
+function renderBudgetCategoryActivity(book, session, month, categoryId) {
+  const report = budgetCategoryActivity(book, session.sub, month, categoryId);
+  const money = value => escape(value.toLocaleString('ko-KR'));
+  const rows = report.rows.map(row => `<tr><td>${escape(row.date)}</td><td>${escape(row.memo)}</td>
+    <td>${row.accounts.map(account => `<a href="/admin/register?accountId=${encodeURIComponent(account.id)}">${escape(account.name)}</a>`).join(' · ')}</td>
+    <td>${money(row.amount)}</td><td>${escape(row.id)}${['manual', 'manual-split', 'manual-reversal'].includes(row.kind) && row.accounts.length ?
+      ` <a href="/admin/transactions/history?${escape(new URLSearchParams({ accountId: row.accounts[0].id, entryId: row.id }).toString())}">변경 이력</a>` : ''}</td></tr>`).join('');
+  return page(`${report.category.name} 예산 지출`, `<p><a href="/admin/budget?month=${encodeURIComponent(month)}">${escape(month)} 예산으로</a></p>
+    <p>이월 잔액 ${money(report.opening)}원 + 이번 달 배정 ${money(report.category.budgeted)}원 − 이번 달 예산 지출 ${money(report.category.spent)}원 = 남은 예산 ${money(report.category.balance)}원</p>
+    ${report.deficit ? `<p class="error">이월 포함 ${money(report.deficit)}원 초과입니다.</p>` : '<p class="notice">남은 예산이 음수가 아닙니다.</p>'}
+    <p>해당 월 전체의 예산 배분만 조회합니다. 분할 거래는 이 카테고리에 배분한 행의 합계만 표시하며, 취소·환급 분개는 기록된 월에 음수로 반영합니다. 예산이 없는 거래는 포함하지 않습니다. 현재 원장을 기준으로 하므로 이전 달의 초과 지출만 이월된 경우 이번 달 거래가 없을 수 있습니다.</p>
+    <div class="table-scroll"><table><tr><th>일자</th><th>메모</th><th>관련 계좌</th><th>예산 지출(원)</th><th>분개 ID</th></tr>${rows || '<tr><td colspan="5">이번 달 예산 지출 내역이 없습니다.</td></tr>'}</table></div>
+    <p>${report.rows.length}건 · 예산 지출 합계 ${money(report.total)}원</p>
+    <p><a href="/admin/budget/category.csv?${escape(new URLSearchParams({ month, categoryId }).toString())}">이 카테고리 지출 CSV 다운로드</a></p>`);
 }
 
 function renderCards(book, session, throughDate, message = '') {
@@ -1311,6 +1336,16 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const query = new URL(req.url, 'http://localhost').searchParams;
       sendHtml(res, 200, renderAccountActivity(book, session, query.get('accountId'),
         query.get('fromDate'), query.get('throughDate'))); return true;
+    }
+    if (req.method === 'GET' && ['/admin/budget/category', '/admin/budget/category.csv'].includes(pathname)) {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const month = query.get('month'); const categoryId = query.get('categoryId');
+      if (pathname.endsWith('.csv')) {
+        const csv = budgetCategoryActivityCsv(book, session.sub, month, categoryId);
+        res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="budgetbook-category.csv"',
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(csv);
+      } else sendHtml(res, 200, renderBudgetCategoryActivity(book, session, month, categoryId));
+      return true;
     }
     if (req.method === 'GET' && pathname === '/admin/budget') {
       const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
