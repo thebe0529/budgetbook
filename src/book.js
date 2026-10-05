@@ -67,6 +67,12 @@ export class Book {
           WHERE locks.account_id = OLD.account_id AND entries.date <= locks.through_date)
         BEGIN SELECT RAISE(ABORT, 'Account period is locked'); END;
       CREATE TABLE IF NOT EXISTS card_plans (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS cancelled_card_plan_update BEFORE UPDATE ON card_plans
+        WHEN json_extract(OLD.data, '$.cancellationId') IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'Cancelled card plans cannot be changed'); END;
+      CREATE TRIGGER IF NOT EXISTS cancelled_card_plan_delete BEFORE DELETE ON card_plans
+        WHEN json_extract(OLD.data, '$.cancellationId') IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'Cancelled card plans cannot be changed'); END;
       CREATE TABLE IF NOT EXISTS card_cash_defaults (card_id TEXT PRIMARY KEY, cash_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_billing_rules (card_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS card_payment_batches (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -300,6 +306,7 @@ export class Book {
       }
       const entries = items.map(({ planId, index }) => {
         const plan = this.cardPlan(planId);
+        if (plan?.cancellationId) throw new Error('Card purchase is cancelled');
         const installment = plan?.installments.find(item => item.index === index);
         if (!installment || installment.paidEntryId) throw new Error('Unknown or already paid installment');
         const entry = { id: `payment:${planId}:${index}`, date, kind: 'card-payment',
@@ -323,6 +330,7 @@ export class Book {
     assertDate(throughDate);
     return this.db.prepare('SELECT data FROM card_plans').all().flatMap(row => {
       const plan = JSON.parse(row.data);
+      if (plan.cancellationId) return [];
       return plan.installments.filter(item => !item.paidEntryId && item.dueDate <= throughDate)
         .map(item => ({ planId: plan.id, cardId: plan.cardId, ...item }));
     }).sort((a, b) => a.dueDate.localeCompare(b.dueDate));

@@ -9,6 +9,7 @@ import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
+import { cardCancellationPreview, cancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
 import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
 import { cardCashDefault, setCardCashDefault, recordCardPurchase, recordCardPayment, recordCardPaymentBatch, visibleCardSchedule } from './card-manual.js';
 import { autoLinkMatches, disableSchedule, forecast, linkOccurrence, linkedOccurrences, listSchedules,
@@ -705,6 +706,24 @@ function renderBudgetCategoryActivity(book, session, month, categoryId, options)
     <p><a href="/admin/budget/category.csv?${escape(csvQuery.toString())}">조건에 맞는 전체 지출 CSV 다운로드</a></p>`);
 }
 
+function renderCardCancellation(book, session, planId, message = '') {
+  const { plan, entry, allowed, hasPayments, expectedHash, cancellation } = cardCancellationPreview(book, session.sub, planId);
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  const amount = entry.postings.filter(p => p.accountId === plan.cardId && p.side === 'credit').reduce((sum, p) => sum + p.amount, 0);
+  const state = cancellation ? `<h2>취소 이력</h2>
+    <p>취소일: ${escape(cancellation.date)} · 취소자: ${escape(cancellation.actor)} · 처리 시각: ${escape(cancellation.createdAt)} (UTC)</p>
+    <p>사유: ${escape(cancellation.reason)}</p><p>취소 분개: ${escape(cancellation.reversalId)}</p>` : hasPayments ?
+    '<p class="notice">이미 납부한 회차가 있어 전체 취소할 수 없습니다. 납부 후 환불 처리는 후속 기능입니다.</p>' : !allowed ?
+    '<p>작성자 또는 소유자에게 카드 쓰기 권한이 있어야 취소할 수 있습니다.</p>' : `<form method="post" action="/admin/cards/cancel">
+    <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="planId" value="${escape(plan.id)}">
+    <input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(expectedHash)}">
+    <label>취소일 (구매일 이후)</label><input type="date" name="date" min="${escape(entry.date)}" value="${today < entry.date ? entry.date : today}" required>
+    <label>취소 사유</label><input name="reason" maxlength="200" required><button>미결제 구매 전체 취소</button></form>`;
+  return page('카드 구매 취소', `${message}<p>카드: ${escape(book.accounts().get(plan.cardId).name)} · 구매일: ${escape(entry.date)} · 금액: ${amount.toLocaleString('ko-KR')}원 · ${plan.installments.length}회차</p>
+    <p>메모: ${escape(entry.memo ?? '')}</p><p>원거래를 보존하고 취소일에 반대 분개를 기록합니다. 비용과 예산은 취소일이 속한 달에 되돌리며 모든 미결제 예정액을 제외합니다. 취소일이 계좌 잠금 기간이면 저장할 수 없습니다. 부분취소와 납부 후 환불은 아직 지원하지 않습니다.</p>
+    ${state}<p><a href="/admin/register?accountId=${encodeURIComponent(plan.cardId)}">카드 원장</a> · <a href="/admin/cards">카드 예정액으로 돌아가기</a></p>`);
+}
+
 function renderCards(book, session, throughDate, message = '', preview = {}) {
   assertDate(throughDate);
   const accounts = [...book.accounts().values()];
@@ -768,7 +787,13 @@ function renderCards(book, session, throughDate, message = '', preview = {}) {
     <input type="hidden" name="throughDate" value="${escape(throughDate)}">
     <label>카드</label><select name="previewCardId">${options(cards, preview.cardId)}</select>
     <label>구매일</label><input type="date" name="purchaseDate" value="${escape(preview.date ?? '')}" required><button>예정일 계산</button></form>` : '';
-  return page('카드 예정액', `${message}${previewForm}${purchase}${defaults}${billing}<h2>미결제 할부 예정액</h2>
+  const purchases = visibleCardPurchases(book, session.sub).map(item => `<tr><td>${escape(item.entry.date)}</td>
+    <td>${escape(accounts.find(a => a.id === item.plan.cardId)?.name ?? '')}</td><td>${escape(item.entry.memo ?? '')}</td>
+    <td>${item.cancellation ? '취소 완료' : item.hasPayments ? '납부 내역 있음' : '전 회차 미결제'}</td>
+    <td><a href="/admin/cards/cancel?planId=${encodeURIComponent(item.plan.id)}">${item.cancellation ? '취소 이력' : item.allowed && !item.hasPayments ? '전체 취소' : '구매 상세'}</a></td></tr>`).join('');
+  const purchaseList = `<h2>카드 구매 내역</h2><p>조회 종료일과 무관하게 접근 가능한 최근 등록 구매 최대 200건을 표시합니다. 모든 회차가 미결제인 구매만 전체 취소할 수 있습니다.</p>
+    <table><tr><th>구매일</th><th>카드</th><th>메모</th><th>상태</th><th>상세·취소</th></tr>${purchases || '<tr><td colspan="5">카드 구매 내역이 없습니다.</td></tr>'}</table>`;
+  return page('카드 예정액', `${message}${previewForm}${purchase}${defaults}${billing}${purchaseList}<h2>미결제 할부 예정액</h2>
     <form method="get" action="/admin/cards"><label>조회 종료일</label>
     <input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
     <table><tr><th>월</th><th>결제 예정액</th></tr>${months}</table>
@@ -1112,6 +1137,17 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         message = rule ? `<p class="notice">첫 결제 예정일: ${escape(firstCardDueDate(preview.date, rule))} (주말: ${escape(({ none: '조정 없음', next: '다음 평일', previous: '이전 평일' })[rule.weekendAdjustment ?? 'none'])}, 공휴일 조정 없음)</p>` : '<p class="error">청구 규칙을 설정하거나 첫 결제 예정일을 직접 입력하세요.</p>';
       }
       sendHtml(res, 200, renderCards(book, session, throughDate, message, preview)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/cards/cancel') {
+      sendHtml(res, 200, renderCardCancellation(book, session, new URL(req.url, 'http://localhost').searchParams.get('planId'))); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/cards/cancel') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const result = cancelCardPurchase(book, session.sub, { planId: form.get('planId'), date: form.get('date'),
+        reason: form.get('reason'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId') });
+      sendHtml(res, 200, renderCardCancellation(book, session, form.get('planId'),
+        `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 카드 구매 취소입니다.</p>`)); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/cards/billing-rule') {
       const form = await formBody(req);
