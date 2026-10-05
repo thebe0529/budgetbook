@@ -97,6 +97,43 @@ test('budget category activity and spending reconcile on leap days including sma
   } finally { book.close(); }
 });
 
+test('category month navigation crosses years, handles leap days and stops at supported endpoints', () => {
+  const book = setup();
+  try {
+    const january = budgetCategoryActivity(book, 'owner', '2027-01', 'food');
+    assert.equal(january.previousMonth, '2026-12'); assert.equal(january.nextMonth, '2027-02');
+    const december = budgetCategoryActivity(book, 'owner', '2026-12', 'food');
+    assert.equal(december.nextMonth, '2027-01'); assert.equal(december.throughDate, '2026-12-31');
+    const leap = budgetCategoryActivity(book, 'owner', '2024-02', 'food');
+    assert.equal(leap.fromDate, '2024-02-01'); assert.equal(leap.throughDate, '2024-02-29');
+    assert.equal(budgetCategoryActivity(book, 'owner', '0000-01', 'food').previousMonth, null);
+    assert.equal(budgetCategoryActivity(book, 'owner', '9999-12', 'food').nextMonth, null);
+  } finally { book.close(); }
+});
+
+test('HTTP category navigation preserves category and scopes account links, CSV and balances to the chosen month', async () => {
+  const book = setup();
+  book.assignBudget('2026-12', 'food', 1000); create(book, '2026-12-31', 1200); create(book, '2027-01-01', 100);
+  const before = book.entries();
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'owner', role: 'owner', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/budget/category`;
+  try {
+    const html = await (await fetch(`${base}?month=2027-01&categoryId=food`)).text();
+    assert.match(html, /value="food" selected/); assert.match(html, /name="month" max="9999-12" value="2027-01"/);
+    assert.match(html, /month=2026-12&amp;categoryId=food/); assert.match(html, /month=2027-02&amp;categoryId=food/);
+    assert.match(html, /accountId=bank&amp;fromDate=2027-01-01&amp;throughDate=2027-01-31/);
+    assert.match(html, /이월 잔액 -200원/); assert.match(html, /남은 예산 -300원/); assert.match(html, /합계 100원/);
+    const previous = await (await fetch(`${base}?month=2026-12&categoryId=food`)).text();
+    assert.match(previous, /합계 1,200원/);
+    const csv = await (await fetch(`${base}.csv?month=2026-12&categoryId=food`)).text();
+    assert.match(csv, /2026-12-31/); assert.doesNotMatch(csv, /2027-01-01/);
+    const low = await (await fetch(`${base}?month=0000-01&categoryId=food`)).text(); assert.doesNotMatch(low, /이전 달 \(/);
+    const high = await (await fetch(`${base}?month=9999-12&categoryId=food`)).text(); assert.doesNotMatch(high, /다음 달 \(/);
+    assert.deepEqual(book.entries(), before);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
 test('budget alerts and drilldown HTTP are owner-only, read-only, escaped and export the same allocated amounts', async () => {
   const book = setup(); const entry = create(book, '2026-10-01', 500, 'food', { memo: '=SUM(1,2)' });
   setTransactionChecked(book, 'owner', 'bank', entry.id, true, entryFingerprint(entry));

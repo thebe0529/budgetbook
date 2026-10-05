@@ -28,8 +28,14 @@ export function budgetCategoryActivity(book, sub, month, categoryId) {
     .sort((a, b) => a.date === b.date ? 0 : a.date > b.date ? -1 : 1);
   const total = rows.reduce((sum, row) => sum + row.amount, 0);
   if (total !== category.spent) throw new Error('Budget category activity reconciliation failed');
+  const monthIndex = Number(month.slice(0, 4)) * 12 + Number(month.slice(5)) - 1;
+  const monthAt = index => index < 0 || index > 9999 * 12 + 11 ? null :
+    `${String(Math.floor(index / 12)).padStart(4, '0')}-${String(index % 12 + 1).padStart(2, '0')}`;
+  const monthEnd = new Date(`${month}-01T00:00:00Z`);
+  monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1, 0);
   return { month, category, opening: category.balance - category.budgeted + category.spent,
-    deficit: Math.max(0, -category.balance), rows, total };
+    deficit: Math.max(0, -category.balance), rows, total, previousMonth: monthAt(monthIndex - 1), nextMonth: monthAt(monthIndex + 1),
+    fromDate: `${month}-01`, throughDate: `${month}-${String(monthEnd.getUTCDate()).padStart(2, '0')}` };
 }
 
 export function budgetCategoryActivityCsv(book, sub, month, categoryId) {
