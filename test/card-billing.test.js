@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { createLedgerAccount } from '../src/manual.js';
-import { firstCardDueDate, cardBillingDates, cardBillingRule, setCardBillingRule } from '../src/card-billing.js';
+import { firstCardBillingDate, firstCardDueDate, cardBillingDates, cardBillingRule, setCardBillingRule } from '../src/card-billing.js';
 import { recordCardPurchase } from '../src/card-manual.js';
 import { createImportApi } from '../src/import-api.js';
 
@@ -45,6 +45,53 @@ test('billing dates clamp short months and retain the configured day across leap
   assert.throws(() => cardBillingDates('9999-12-31', 2, monthEnd), /supported dates/);
 });
 
+test('weekend adjustment handles Saturday and Sunday without shifting the billing month anchor', () => {
+  const end = { closingDay: 31, paymentDay: 31, paymentMonthOffset: 1, weekendAdjustment: 'next' };
+  assert.equal(firstCardBillingDate('2026-12-31', end), '2027-01-31');
+  assert.equal(firstCardDueDate('2026-12-31', end), '2027-02-01');
+  assert.deepEqual(cardBillingDates('2027-01-31', 3, end), ['2027-02-01', '2027-03-01', '2027-03-31']);
+  const first = { closingDay: 15, paymentDay: 1, paymentMonthOffset: 1, weekendAdjustment: 'previous' };
+  assert.equal(firstCardDueDate('2026-02-10', first), '2026-02-27');
+  assert.deepEqual(cardBillingDates('2026-03-01', 3, first), ['2026-02-27', '2026-04-01', '2026-05-01']);
+  assert.equal(firstCardDueDate('2026-02-10', { ...first, weekendAdjustment: 'next' }), '2026-03-02');
+  assert.equal(firstCardDueDate('2027-12-10', first), '2027-12-31');
+  assert.equal(firstCardDueDate('2027-12-10', { ...first, weekendAdjustment: 'next' }), '2028-01-03');
+  const saturday = { closingDay: 15, paymentDay: 28, paymentMonthOffset: 0 };
+  assert.equal(firstCardDueDate('2026-02-10', { ...saturday, weekendAdjustment: 'next' }), '2026-03-02');
+  assert.equal(firstCardDueDate('2026-02-10', { ...saturday, weekendAdjustment: 'previous' }), '2026-02-27');
+  assert.equal(firstCardDueDate('2026-02-10', { ...saturday, weekendAdjustment: 'none' }), '2026-02-28');
+  assert.throws(() => firstCardDueDate('2026-02-28', { closingDay: 30, paymentDay: 31,
+    paymentMonthOffset: 0, weekendAdjustment: 'previous' }), /precedes purchase/);
+  for (const weekendAdjustment of ['', 'holiday', 1]) assert.throws(() => firstCardDueDate('2026-02-10', { ...first, weekendAdjustment }), /weekend/);
+});
+
+test('weekend-adjusted purchases snapshot settings, preserve amounts and replay legacy rules', () => {
+  const { book, card, expense } = fixture();
+  try {
+    const input = { requestId: randomUUID(), date: '2026-12-31', cardId: card.id, expenseId: expense.id,
+      amountExpression: '10001', count: '3', firstDueDate: '' };
+    const end = { closingDay: 31, paymentDay: 31, paymentMonthOffset: 1 };
+    setCardBillingRule(book, 'owner', card.id, end);
+    const old = recordCardPurchase(book, 'editor', input).plan;
+    setCardBillingRule(book, 'owner', card.id, { ...end, weekendAdjustment: 'next' });
+    assert.equal(recordCardPurchase(book, 'editor', input).duplicate, true);
+    assert.equal(old.installments[0].dueDate, '2027-01-31');
+    const newInput = { ...input, requestId: randomUUID() };
+    const plan = recordCardPurchase(book, 'editor', newInput).plan;
+    assert.deepEqual(plan.installments.map(i => i.dueDate), ['2027-02-01', '2027-03-01', '2027-03-31']);
+    assert.deepEqual(plan.installments.map(i => i.amount), [3334, 3334, 3333]);
+    assert.equal(plan.billingRule.weekendAdjustment, 'next');
+    setCardBillingRule(book, 'owner', card.id, { ...end, weekendAdjustment: 'previous' });
+    assert.equal(recordCardPurchase(book, 'editor', newInput).duplicate, true);
+    const manual = recordCardPurchase(book, 'editor', { ...input, requestId: randomUUID(), firstDueDate: '2027-01-31' }).plan;
+    assert.equal(manual.installments[0].dueDate, '2027-01-31'); assert.equal(manual.billingRule, undefined);
+    setCardBillingRule(book, 'owner', card.id, { closingDay: 30, paymentDay: 31, paymentMonthOffset: 0, weekendAdjustment: 'previous' });
+    assert.throws(() => recordCardPurchase(book, 'editor', { ...input, requestId: randomUUID(), date: '2026-02-28' }), /precedes purchase/);
+    assert.equal(book.entries().length, 3);
+    assert.equal(book.reports('2026-12-01', '2026-12-31').incomeStatement.expenses, 30003);
+  } finally { book.close(); }
+});
+
 test('billing rules require owner writes and account reads and persist across database reopen', () => {
   const dir = mkdtempSync(join(tmpdir(), 'budgetbook-billing-')); const file = join(dir, 'book.sqlite');
   let book; let card;
@@ -56,8 +103,9 @@ test('billing rules require owner writes and account reads and persist across da
     assert.deepEqual(cardBillingRule(book, 'editor', card.id), rule);
     assert.throws(() => cardBillingRule(book, 'viewer', card.id), /read access/);
     assert.throws(() => setCardBillingRule(book, 'owner', card.id, { ...rule, paymentDay: 1 }));
+    setCardBillingRule(book, 'owner', card.id, { ...rule, weekendAdjustment: 'next' });
     book.close(); book = new Book(file);
-    assert.deepEqual(cardBillingRule(book, 'owner', card.id), rule);
+    assert.deepEqual(cardBillingRule(book, 'owner', card.id), { ...rule, weekendAdjustment: 'next' });
     setCardBillingRule(book, 'owner', card.id, null);
     assert.equal(cardBillingRule(book, 'owner', card.id), null);
   } finally { book?.close(); rmSync(dir, { recursive: true, force: true }); }
@@ -109,7 +157,7 @@ test('billing settings and preview HTTP routes enforce CSRF and permissions and 
     assert.equal((await send('billing-rule', { ...values, paymentMonthOffset: '' })).status, 400);
     const preview = await fetch(`${base}?throughDate=2027-12-31&previewCardId=${card.id}&purchaseDate=2026-10-16`);
     assert.equal(preview.status, 200); const html = await preview.text();
-    assert.match(html, /첫 결제 예정일: 2026-11-25/); assert.match(html, /공휴일·주말 조정 없음/);
+    assert.match(html, /첫 결제 예정일: 2026-11-25/); assert.match(html, /주말: 조정 없음, 공휴일 조정 없음/);
     assert.match(html, /name="date" value="2026-10-16" required/);
     assert.doesNotMatch(html, /name="firstDueDate" required/);
     sub = 'viewer'; assert.equal((await fetch(`${base}?previewCardId=${card.id}&purchaseDate=2026-10-16`)).status, 400);
@@ -120,5 +168,12 @@ test('billing settings and preview HTTP routes enforce CSRF and permissions and 
     sub = 'owner'; assert.equal((await send('billing-rule', { ...values, action: 'clear' })).status, 200);
     assert.equal(cardBillingRule(book, 'owner', card.id), null);
     assert.equal(book.entries().length, 1);
+    assert.equal((await send('billing-rule', { ...values, closingDay: '31', paymentDay: '31', paymentMonthOffset: '1', weekendAdjustment: 'invalid' })).status, 400);
+    const adjusted = await send('billing-rule', { ...values, closingDay: '31', paymentDay: '31', paymentMonthOffset: '1', weekendAdjustment: 'next' });
+    assert.equal(adjusted.status, 200); assert.match(await adjusted.text(), /value="next" selected/);
+    const weekendPreview = await fetch(`${base}?previewCardId=${card.id}&purchaseDate=2026-12-31`);
+    const weekendHtml = await weekendPreview.text();
+    assert.match(weekendHtml, /첫 결제 예정일: 2027-02-01/); assert.match(weekendHtml, /주말: 다음 평일/);
+    assert.equal(cardBillingRule(book, 'owner', card.id).weekendAdjustment, 'next');
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });

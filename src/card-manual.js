@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { calculateAmount } from './amount-expression.js';
 import { assertDate } from './ledger.js';
 import { canAccessAccount, member } from './members.js';
-import { cardBillingRule, firstCardDueDate } from './card-billing.js';
+import { cardBillingRule, firstCardBillingDate, firstCardDueDate } from './card-billing.js';
 
 const validId = id => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id);
 const digest = data => createHash('sha256').update(JSON.stringify(data)).digest('hex');
@@ -41,7 +41,8 @@ export function recordCardPurchase(book, userSub, input) {
   const automatic = !input.firstDueDate;
   const billingRule = automatic ? (previous?.billingRule ?? cardBillingRule(book, userSub, cardId)) : null;
   if (automatic && !billingRule) throw new Error('Set a card billing rule or enter the first payment date');
-  const firstDueDate = automatic ? firstCardDueDate(date, billingRule) : input.firstDueDate;
+  const firstDueDate = automatic ? firstCardBillingDate(date, billingRule) : input.firstDueDate;
+  if (automatic) firstCardDueDate(date, billingRule); // Also reject adjustment before the purchase date.
   assertDate(firstDueDate);
   if (firstDueDate < date) throw new Error('First payment date precedes purchase');
   if (typeof memo !== 'string' || memo.length > 500) throw new Error('Invalid memo');

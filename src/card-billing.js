@@ -7,11 +7,14 @@ export function validateBillingRule(rule) {
     !Number.isInteger(rule.paymentMonthOffset) || rule.paymentMonthOffset < 0 || rule.paymentMonthOffset > 2) {
     throw new Error('Invalid card billing rule');
   }
+  const weekendAdjustment = rule.weekendAdjustment ?? 'none';
+  if (!['none', 'next', 'previous'].includes(weekendAdjustment)) throw new Error('Invalid weekend adjustment');
   // Every purchase through the closing date must have a payment date after that date.
   if (rule.paymentMonthOffset === 0 && rule.paymentDay <= rule.closingDay) {
     throw new Error('Same-month payment must follow closing day');
   }
-  return { closingDay: rule.closingDay, paymentDay: rule.paymentDay, paymentMonthOffset: rule.paymentMonthOffset };
+  return { closingDay: rule.closingDay, paymentDay: rule.paymentDay, paymentMonthOffset: rule.paymentMonthOffset,
+    ...(weekendAdjustment === 'none' ? {} : { weekendAdjustment }) };
 }
 
 function monthDate(year, month, offset, day) {
@@ -23,7 +26,7 @@ function monthDate(year, month, offset, day) {
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(Math.min(day, last)).padStart(2, '0')}`;
 }
 
-export function firstCardDueDate(date, input) {
+export function firstCardBillingDate(date, input) {
   assertDate(date);
   const rule = validateBillingRule(input);
   const [year, month] = date.split('-').map(Number);
@@ -31,12 +34,33 @@ export function firstCardDueDate(date, input) {
   return monthDate(year, month, (date > closing ? 1 : 0) + rule.paymentMonthOffset, rule.paymentDay);
 }
 
-export function cardBillingDates(firstDueDate, count, input) {
-  assertDate(firstDueDate);
+function adjustWeekend(date, rule) {
+  if (!rule.weekendAdjustment) return date;
+  const day = new Date(`${date}T00:00:00Z`);
+  const weekday = day.getUTCDay();
+  if (weekday !== 0 && weekday !== 6) return date;
+  const offset = rule.weekendAdjustment === 'next' ? (weekday === 6 ? 2 : 1) : (weekday === 6 ? -1 : -2);
+  day.setUTCDate(day.getUTCDate() + offset);
+  const adjusted = day.toISOString().slice(0, 10);
+  if (adjusted < '0001-01-01') throw new Error('Card schedule exceeds supported dates');
+  try { assertDate(adjusted); } catch { throw new Error('Card schedule exceeds supported dates'); }
+  return adjusted;
+}
+
+export function firstCardDueDate(date, input) {
+  const rule = validateBillingRule(input);
+  const result = adjustWeekend(firstCardBillingDate(date, rule), rule);
+  if (result < date) throw new Error('Weekend-adjusted payment date precedes purchase');
+  return result;
+}
+
+// The anchor is the unadjusted first billing date, even when the actual payment crosses a month boundary.
+export function cardBillingDates(firstBillingDate, count, input) {
+  assertDate(firstBillingDate);
   const rule = validateBillingRule(input);
   if (!Number.isInteger(count) || count < 1 || count > 120) throw new Error('Invalid installment count');
-  const [year, month] = firstDueDate.split('-').map(Number);
-  return Array.from({ length: count }, (_, offset) => monthDate(year, month, offset, rule.paymentDay));
+  const [year, month] = firstBillingDate.split('-').map(Number);
+  return Array.from({ length: count }, (_, offset) => adjustWeekend(monthDate(year, month, offset, rule.paymentDay), rule));
 }
 
 export function cardBillingRule(book, sub, cardId) {

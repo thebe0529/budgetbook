@@ -255,6 +255,7 @@ export class Book {
     if (billingRule) {
       billingRule = validateBillingRule(billingRule);
       const dates = cardBillingDates(firstDueDate, count, billingRule);
+      if (dates[0] < date) throw new Error('Weekend-adjusted payment date precedes purchase');
       installments.forEach((item, i) => { item.dueDate = dates[i]; });
     }
     const entry = { id: `purchase:${id}`, date, memo,

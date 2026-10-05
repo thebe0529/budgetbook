@@ -725,7 +725,7 @@ function renderCards(book, session, throughDate, message = '', preview = {}) {
     <label>금액 (사칙연산 가능)</label><input name="amountExpression" required>
     <label>할부 개월 수 (일시불은 1)</label><input type="number" name="count" min="1" max="120" value="1" required>
     <label>첫 결제 예정일 (직접 지정 시 청구 규칙 대신 적용)</label><input type="date" name="firstDueDate">
-    <p>청구 규칙이 설정된 카드는 첫 결제 예정일을 비우면 자동 계산합니다. 공휴일·주말은 자동 조정하지 않으므로 실제 청구서와 확인하세요.</p>
+    <p>청구 규칙이 설정된 카드는 첫 결제 예정일을 비우면 자동 계산합니다. 주말은 카드별 규칙을 적용합니다. 공휴일은 자동 조정하지 않으므로 실제 청구서와 확인하세요.</p>
     <label>예산 카테고리 (온버짓 카드만)</label><select name="categoryId"><option value="">없음</option>${options(categories)}</select>
     <label>메모</label><input name="memo"><button>구매 저장</button></form>` :
     '<p>카드와 비용 계정을 등록해야 구매 내역을 입력할 수 있습니다.</p>';
@@ -759,6 +759,8 @@ function renderCards(book, session, throughDate, message = '', preview = {}) {
       <label>이용 마감일 (1~31일)</label><input type="number" name="closingDay" min="1" max="31" value="${rule?.closingDay ?? 15}">
       <label>결제일 (1~31일)</label><input type="number" name="paymentDay" min="1" max="31" value="${rule?.paymentDay ?? 25}">
       <label>마감 월 기준 결제 월</label><select name="paymentMonthOffset">${[0, 1, 2].map(n => `<option value="${n}" ${n === (rule?.paymentMonthOffset ?? 0) ? 'selected' : ''}>${['같은 달', '다음 달', '다다음 달'][n]}</option>`).join('')}</select>
+      <label>결제 예정일이 주말인 경우</label><select name="weekendAdjustment">${[['none', '조정 없음'], ['next', '다음 평일'], ['previous', '이전 평일']].map(([value, label]) => `<option value="${value}" ${value === (rule?.weekendAdjustment ?? 'none') ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <p>토요일·일요일만 조정합니다. 이전 평일이 구매일보다 앞서면 저장하지 않습니다. 직접 지정한 첫 예정일에는 이 규칙을 적용하지 않습니다.</p>
       <p>${rule ? '자동 계산 사용 중' : '설정되지 않음 — 첫 결제 예정일 직접 입력 필요'}</p>
       <button name="action" value="save">청구 규칙 저장</button><button name="action" value="clear">청구 규칙 해제</button></form>`;
     }).join('')}`;
@@ -1107,7 +1109,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         if (!canAccessAccount(book, session.sub, preview.cardId, 'write') || !book.accounts().get(preview.cardId)?.card) throw new Error('Card write access required');
         assertDate(preview.date);
         const rule = cardBillingRule(book, session.sub, preview.cardId);
-        message = rule ? `<p class="notice">첫 결제 예정일: ${escape(firstCardDueDate(preview.date, rule))} (공휴일·주말 조정 없음)</p>` : '<p class="error">청구 규칙을 설정하거나 첫 결제 예정일을 직접 입력하세요.</p>';
+        message = rule ? `<p class="notice">첫 결제 예정일: ${escape(firstCardDueDate(preview.date, rule))} (주말: ${escape(({ none: '조정 없음', next: '다음 평일', previous: '이전 평일' })[rule.weekendAdjustment ?? 'none'])}, 공휴일 조정 없음)</p>` : '<p class="error">청구 규칙을 설정하거나 첫 결제 예정일을 직접 입력하세요.</p>';
       }
       sendHtml(res, 200, renderCards(book, session, throughDate, message, preview)); return true;
     }
@@ -1120,7 +1122,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         .some(name => !/^\d{1,2}$/.test(form.get(name) ?? ''))) throw new Error('Complete billing rule required');
       setCardBillingRule(book, session.sub, form.get('cardId'), form.get('action') === 'clear' ? null : {
         closingDay: Number(form.get('closingDay')), paymentDay: Number(form.get('paymentDay')),
-        paymentMonthOffset: Number(form.get('paymentMonthOffset')) });
+        paymentMonthOffset: Number(form.get('paymentMonthOffset')), weekendAdjustment: form.get('weekendAdjustment') ?? 'none' });
       sendHtml(res, 200, renderCards(book, session, throughDate, '<p class="notice">카드 청구 규칙을 저장했습니다.</p>')); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/cards/default-cash') {
