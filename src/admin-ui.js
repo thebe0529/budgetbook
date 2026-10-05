@@ -117,7 +117,9 @@ function renderRegister(book, session, accountId, message = '', filters = regist
       <label>유형</label><select name="kind">${[['expense', '지출'], ['income', '수입'], ['transfer', '이체·카드 결제'],
         ...(session.role === 'owner' ? [['opening', '기초 잔액']] : [])].map(([value, label]) => `<option value="${value}"${entryKind === value ? ' selected' : ''}>${label}</option>`).join('')}</select>
       <label>상대 계정</label><select name="counterId" required>${counters}</select>
-      <label>금액 (사칙연산 가능)</label><input name="amountExpression" required placeholder="10000+2500*2">
+      <label>금액 (사칙연산 가능)</label><input name="amountExpression" required maxlength="256" placeholder="10000+2500*2" aria-describedby="manual-amount-help manual-amount-preview">
+      <p id="manual-amount-help">숫자와 + - * / 괄호를 사용하고 소수는 원 단위로 반올림합니다. 계산 결과가 1원 이상이어야 저장할 수 있습니다.</p>
+      <p id="manual-amount-preview" data-amount-preview role="status" aria-live="polite">금액을 입력하면 계산 결과를 표시합니다.</p>
       <label>예산 카테고리 (온버짓 지출만)</label><select name="categoryId"><option value="">없음</option>${[...book.budgetCategories().values()].map(c => `<option value="${escape(c.id)}"${c.id === entryDefaults?.categoryId ? ' selected' : ''}>${escape(c.name)}</option>`).join('')}</select>
       <label>메모</label><input name="memo" maxlength="500">
       <label><input type="checkbox" name="continueEntry" value="true"${entryDefaults?.continueEntry !== false ? ' checked' : ''} style="width:auto">저장 후 입력 조건을 유지하고 계속 입력</label>

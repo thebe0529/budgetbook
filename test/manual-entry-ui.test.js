@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupManualEntry } from '../src/manual-entry-ui.js';
+import { calculateAmount } from '../src/amount-expression.js';
 import { Book } from '../src/book.js';
 import { ensureOwner, setMember } from '../src/members.js';
 import { createImportApi } from '../src/import-api.js';
@@ -11,17 +12,20 @@ function target() {
 }
 function fixture(onBudget = true) {
   const fields = Object.fromEntries(['kind', 'counterId', 'categoryId', 'amountExpression', 'memo'].map(name => [name,
-    { ...target(), value: '', disabled: false, focused: 0, focus() { this.focused++; } }]));
+    { ...target(), value: '', disabled: false, focused: 0, focus() { this.focused++; }, validationMessage: '', reports: 0,
+      setCustomValidity(message) { this.validationMessage = message; },
+      checkValidity() { return this.value !== '' && !this.validationMessage; }, reportValidity() { this.reports++; } }]));
   fields.kind.value = 'expense'; fields.categoryId.value = 'food'; fields.counterId.value = 'salary';
   fields.counterId.options = [['expense', 'expense'], ['salary', 'income'], ['other', 'asset'], ['card', 'liability'], ['equity', 'equity']]
     .map(([value, counterType]) => ({ value, dataset: { counterType } }));
   const button = { textContent: '거래 저장', disabled: false };
+  const preview = { textContent: '', className: '' };
   const surface = target();
   const form = { ...target(), dataset: { onBudget: String(onBudget), focusAfterSave: 'true' },
-    elements: { namedItem: name => fields[name] }, querySelector: () => button, requests: 0,
+    elements: { namedItem: name => fields[name] }, querySelector: selector => selector === '[data-amount-preview]' ? preview : button, requests: 0,
     requestSubmit() { this.requests++; } };
   setupManualEntry(form, surface);
-  return { form, fields, surface, button };
+  return { form, fields, surface, button, preview };
 }
 function key(target, values = {}) {
   return { key: 'Enter', target, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...values };
@@ -60,12 +64,43 @@ test('type changes limit counterpart options and clear inapplicable categories w
 
 test('duplicate submit is blocked until browser back restores the form, while canceled submit remains usable', () => {
   const { form, fields, surface, button } = fixture();
+  fields.amountExpression.value = '100';
   form.emit('submit', { defaultPrevented: true }); assert.equal(button.disabled, false);
   form.emit('submit', { defaultPrevented: false }); assert.equal(button.disabled, true); assert.equal(button.textContent, '저장 중…');
   const second = key(fields.memo); form.emit('submit', second); assert.equal(second.defaultPrevented, true);
   form.emit('keydown', key(fields.memo)); assert.equal(form.requests, 0);
   surface.emit('pageshow'); assert.equal(button.disabled, false); assert.equal(button.textContent, '거래 저장');
   form.emit('keydown', key(fields.memo)); assert.equal(form.requests, 1);
+});
+
+test('live amount previews share server arithmetic and rounding, safely displaying syntax and range errors', () => {
+  const { fields, preview } = fixture(); const amount = fields.amountExpression;
+  for (const value of ['10000+2500*2', '(100+200)/3', '0.1+0.2+0.3', '1.5', '9007199254740991']) {
+    amount.value = value; amount.emit('input');
+    assert.equal(preview.textContent, `계산 결과: ${calculateAmount(value).toLocaleString('ko-KR')}원`);
+    assert.equal(amount.validationMessage, ''); assert.equal(preview.className, 'notice');
+  }
+  for (const value of ['0', '-100', '0.49', '1/0', '9007199254740992', '1+', 'alert(1)', 'x'.repeat(257)]) {
+    amount.value = value; amount.emit('input'); assert.ok(amount.validationMessage); assert.equal(preview.className, 'error');
+    assert.ok(!preview.textContent.includes('alert(1)'));
+  }
+  amount.value = '   '; amount.emit('input'); assert.ok(amount.validationMessage);
+  amount.value = ''; amount.emit('input'); assert.equal(amount.validationMessage, ''); assert.equal(preview.className, '');
+});
+
+test('invalid programmatic amounts block submit without locking the form and browser restoration recomputes previews', () => {
+  const { form, fields, surface, button, preview } = fixture(); const amount = fields.amountExpression;
+  amount.value = '1/0'; const invalid = key(fields.memo); form.emit('submit', invalid);
+  assert.equal(invalid.defaultPrevented, true); assert.equal(button.disabled, false); assert.equal(amount.reports, 1);
+  amount.value = '200'; surface.emit('pageshow'); assert.equal(preview.textContent, '계산 결과: 200원'); assert.equal(amount.validationMessage, '');
+  const valid = key(fields.memo); form.emit('submit', valid); assert.equal(valid.defaultPrevented, false); assert.equal(button.disabled, true);
+});
+
+test('amount preview waits for IME composition completion before validating a new input', () => {
+  const { form, fields, preview } = fixture(); const amount = fields.amountExpression;
+  amount.value = '100'; amount.emit('input'); const prior = preview.textContent;
+  form.emit('compositionstart'); amount.value = '100+200'; amount.emit('input'); assert.equal(preview.textContent, prior);
+  form.emit('compositionend'); assert.equal(preview.textContent, '계산 결과: 300원');
 });
 
 test('HTTP continued entry preserves valid conditions, clears amount and memo and generates a fresh idempotency key', async () => {
@@ -83,6 +118,7 @@ test('HTTP continued entry preserves valid conditions, clears amount and memo an
   try {
     const original = entryForm(await (await fetch(`${base}/register?accountId=bank`)).text());
     assert.match(original, /data-focus-after-save="false"/); assert.match(original, /value="expense" data-counter-type="expense" selected/);
+    assert.match(original, /maxlength="256"/); assert.match(original, /data-amount-preview role="status" aria-live="polite"/);
     assert.doesNotMatch(original, /value="private"/); assert.doesNotMatch(original, /value="bank" data-counter-type/);
     const requestId = original.match(/name="requestId" value="([^"]+)"/)[1];
     const values = new URLSearchParams({ csrf: 'token', accountId: 'bank', requestId, date: '2026-09-27', kind: 'expense', counterId: 'expense',
@@ -98,6 +134,8 @@ test('HTTP continued entry preserves valid conditions, clears amount and memo an
     assert.match(stopped, /data-focus-after-save="false"/); assert.match(stopped, /name="continueEntry" value="true" style=/);
     assert.doesNotMatch(stopped, /value="2026-09-27"/);
     const asset = await fetch(`${base}/assets/manual-entry-ui.js`); assert.equal(asset.status, 200);
+    assert.match(await asset.text(), /import \{ calculateAmount \} from '\.\/amount-expression\.js'/);
+    assert.equal((await fetch(`${base}/assets/amount-expression.js`)).status, 200);
     assert.equal(asset.headers.get('cache-control'), 'no-store'); assert.match(asset.headers.get('content-type'), /javascript/);
     values.set('amountExpression', '999'); assert.equal((await send()).status, 400); assert.equal(book.entries().length, 1);
     sub = 'viewer'; assert.doesNotMatch(await (await fetch(`${base}/register?accountId=bank`)).text(), /data-manual-entry/);
