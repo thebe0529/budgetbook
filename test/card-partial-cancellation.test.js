@@ -10,6 +10,8 @@ import { recordCardPurchase, recordCardPayment } from '../src/card-manual.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase } from '../src/card-cancellation.js';
 import { forecast } from '../src/forecast.js';
 import { createImportApi } from '../src/import-api.js';
+import { refundPaidCardPurchase } from '../src/card-refund.js';
+import { cardRefundReceiptPreview } from '../src/card-refund-receipt.js';
 
 function fixture(filename, amount = '12000') {
   const book = new Book(filename); ensureOwner(book, 'owner');
@@ -27,6 +29,113 @@ function fixture(filename, amount = '12000') {
 }
 const request = (book, plan, amountExpression = '2000') => ({ requestId: randomUUID(), planId: plan.id,
   expectedHash: cardCancellationPreview(book, 'editor', plan.id).expectedHash, date: '2026-11-01', reason: '부분 반품', amountExpression });
+
+test('partial cancellation can reduce earliest or latest installments and final cancellation clears only the remainder', () => {
+  for (const [distributionMode, amounts] of [['earliest-first', [0, 3000, 4000]], ['latest-first', [4000, 3000, 0]]]) {
+    const { book, plan } = fixture();
+    try {
+      const input = { ...request(book, plan, '5000'), distributionMode };
+      partiallyCancelCardPurchase(book, 'editor', input);
+      assert.deepEqual(book.cardPlan(plan.id).installments.map(i => i.amount), amounts);
+      assert.deepEqual(book.cardPlan(plan.id).installments.map(i => i.dueDate), plan.installments.map(i => i.dueDate));
+      assert.equal(book.pendingCardPayments('9999-12-31').length, 2);
+      assert.equal(book.budget('2026-11').categories.food.spent, -5000);
+      assert.equal(book.reports('2026-11-01', '2026-11-30').cashFlow.netChange, 0);
+      const projected = forecast(book, 'owner', { asOf: '2026-10-10', throughDate: '2027-02-01', cardCashId: 'cash' }).events.filter(e => e.type === 'card');
+      assert.equal(projected.length, 2); assert.equal(projected.reduce((sum, e) => sum + e.amount, 0), -7000);
+      assert.throws(() => partiallyCancelCardPurchase(book, 'editor', { ...input, distributionMode: 'equal' }), /reused/);
+      const full = { ...request(book, plan), date: '2026-12-01' };
+      assert.equal(cancelCardPurchase(book, 'editor', full).entry.postings[0].amount, 7000);
+      assert.equal(book.reports('2026-10-01', '2026-12-31').incomeStatement.expenses, 0);
+      assert.equal(book.pendingCardPayments('9999-12-31').length, 0);
+      assert.equal(partiallyCancelCardPurchase(book, 'editor', input).duplicate, true);
+    } finally { book.close(); }
+  }
+});
+
+test('manual partial deductions survive reopen and payment and canonical replay preserves the original allocation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'partial-allocation-')); let book;
+  try {
+    const setup = fixture(join(dir, 'book.sqlite')); book = setup.book;
+    const input = { ...request(book, setup.plan), distributionMode: 'manual', deductions: [
+      { index: 3, amountExpression: '500*2' }, { index: 1, amountExpression: '1000' }, { index: 2, amountExpression: '0' }] };
+    partiallyCancelCardPurchase(book, 'editor', input);
+    assert.deepEqual(book.cardPlan(setup.plan.id).installments.map(i => i.amount), [3000, 4000, 3000]);
+    const audit = cardCancellationPreview(book, 'viewer', setup.plan.id).partials[0];
+    assert.equal(audit.distributionMode, 'manual'); assert.deepEqual(audit.deductions, [{ index: 1, amount: 1000 }, { index: 2, amount: 0 }, { index: 3, amount: 1000 }]);
+    book.close(); book = new Book(join(dir, 'book.sqlite'));
+    recordCardPayment(book, 'editor', { planId: setup.plan.id, index: 1, date: '2026-11-25', cashId: 'cash', expectedAmount: 3000 });
+    const equivalent = { ...input, deductions: [{ index: 1, amountExpression: '500+500' }, { index: 2, amountExpression: '0' }, { index: 3, amountExpression: '1000' }] };
+    assert.equal(partiallyCancelCardPurchase(book, 'editor', equivalent).duplicate, true);
+    assert.throws(() => partiallyCancelCardPurchase(book, 'editor', { ...input, deductions: [{ index: 1, amountExpression: '2000' }] }), /reused/);
+    assert.throws(() => partiallyCancelCardPurchase(book, 'editor', { ...request(book, setup.plan), distributionMode: 'latest-first' }), /refund workflow/);
+    assert.equal(book.entries().length, 3);
+  } finally { book?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('invalid deductions and failed custom partial saves leave the original plan and budget intact', () => {
+  const { book, plan } = fixture();
+  try {
+    const input = { ...request(book, plan), distributionMode: 'manual' };
+    for (const deductions of [undefined, [], [{ index: 1, amountExpression: '-1' }], [{ index: 1, amountExpression: '4001' }],
+      [{ index: 1, amountExpression: '1999' }], [{ index: 4, amountExpression: '2000' }],
+      [{ index: 1, amountExpression: '1000' }, { index: 1, amountExpression: '1000' }]]) {
+      assert.throws(() => partiallyCancelCardPurchase(book, 'editor', { ...input, deductions }));
+    }
+    const valid = { ...input, deductions: [{ index: 1, amountExpression: '2000' }] };
+    for (const table of ['card_partial_cancellations', 'card_plans']) {
+      book.db.exec(`CREATE TRIGGER fail_custom_partial BEFORE ${table === 'card_plans' ? 'UPDATE' : 'INSERT'} ON ${table} BEGIN SELECT RAISE(ABORT, 'custom failure'); END`);
+      assert.throws(() => partiallyCancelCardPurchase(book, 'editor', valid), /custom failure/);
+      assert.deepEqual(book.cardPlan(plan.id), plan); assert.equal(book.entries().length, 1);
+      assert.equal(book.budget('2026-11').categories.food.spent, 0);
+      book.db.exec('DROP TRIGGER fail_custom_partial');
+    }
+    partiallyCancelCardPurchase(book, 'editor', valid);
+    assert.deepEqual(book.cardPlan(plan.id).installments.map(i => i.amount), [2000, 4000, 4000]);
+    assert.throws(() => partiallyCancelCardPurchase(book, 'editor', { ...valid, requestId: randomUUID() }), /changed/);
+  } finally { book.close(); }
+});
+
+test('front-loaded partial cancellation excludes zero dues and supports paying and refunding the remaining single won', () => {
+  const { book, plan } = fixture(undefined, '3');
+  try {
+    const input = { ...request(book, plan, '2'), distributionMode: 'earliest-first' };
+    partiallyCancelCardPurchase(book, 'editor', input);
+    assert.deepEqual(book.cardPlan(plan.id).installments.map(i => i.amount), [0, 0, 1]);
+    assert.equal(book.pendingCardPayments('9999-12-31')[0].index, 3);
+    assert.throws(() => recordCardPayment(book, 'editor', { planId: plan.id, index: 1, date: '2027-01-25', cashId: 'cash', expectedAmount: 0 }), /zero/);
+    recordCardPayment(book, 'editor', { planId: plan.id, index: 3, date: '2027-01-25', cashId: 'cash', expectedAmount: 1 });
+    const refund = { ...request(book, plan, '1'), date: '2027-02-01' };
+    refundPaidCardPurchase(book, 'editor', refund);
+    assert.equal(cardRefundReceiptPreview(book, 'editor', refund.requestId).receiptLimit, 1);
+    assert.equal(cardCancellationPreview(book, 'viewer', plan.id).remainingAmount, 0);
+    assert.equal(book.reports('2026-10-01', '2027-02-28').incomeStatement.expenses, 0);
+    assert.equal(partiallyCancelCardPurchase(book, 'editor', input).duplicate, true);
+  } finally { book.close(); }
+});
+
+test('HTTP partial allocation validates manual fields, escapes history and preserves existing CSRF and permission rules', async () => {
+  const { book, plan } = fixture(); let sub = 'editor';
+  const server = createImportApi(book, { auth: { session: () => ({ sub, role: sub, csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/cards`;
+  try {
+    const page = await (await fetch(`${base}/cancel?planId=${plan.id}`)).text();
+    assert.match(page, /name="distributionMode"/); assert.match(page, /name="deduction:1"/); assert.match(page, /합계는 부분취소 금액과 같아야/);
+    const input = { ...request(book, plan), distributionMode: 'manual', csrf: 'token', reason: '<지정 & 취소>', 'deduction:1': '2000', 'deduction:2': '0', 'deduction:3': '0' };
+    const send = values => fetch(`${base}/cancel-partial`, { method: 'POST', body: new URLSearchParams(values) });
+    assert.equal((await send({ ...input, csrf: 'bad' })).status, 403);
+    assert.equal((await send({ ...input, 'deduction:1': '1999' })).status, 400);
+    assert.equal((await send({ ...input, 'deduction:1x': '0' })).status, 400);
+    const duplicate = new URLSearchParams(input); duplicate.append('deduction:1', '0');
+    assert.equal((await fetch(`${base}/cancel-partial`, { method: 'POST', body: duplicate })).status, 400);
+    sub = 'viewer'; assert.equal((await send(input)).status, 400);
+    sub = 'editor'; const result = await send(input); assert.equal(result.status, 200);
+    const html = await result.text(); assert.match(html, /배분 방식: 회차별 차감액 직접 지정/); assert.match(html, /&lt;지정 &amp; 취소&gt;/);
+    assert.match(html, /4,000원 → 2,000원/); assert.equal((await send(input)).status, 200);
+    assert.equal(book.entries().length, 2);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
 
 test('partial cancellation reverses only the chosen amount and evenly reallocates installments without shifting dates', () => {
   const { book, plan, purchase } = fixture();
@@ -119,6 +228,9 @@ test('partial history and original request receipts persist across database reop
   try {
     const setup = fixture(file); book = setup.book; const { plan } = setup;
     const input = request(book, plan); partiallyCancelCardPurchase(book, 'editor', input);
+    const row = book.db.prepare('SELECT data FROM card_partial_cancellations WHERE id = ?').get(input.requestId);
+    const legacy = JSON.parse(row.data); delete legacy.distributionMode; delete legacy.deductions;
+    book.db.prepare('UPDATE card_partial_cancellations SET data = ? WHERE id = ?').run(JSON.stringify(legacy), input.requestId);
     book.close(); book = new Book(file);
     assert.equal(partiallyCancelCardPurchase(book, 'editor', input).duplicate, true);
     assert.equal(cardCancellationPreview(book, 'viewer', plan.id).partials[0].amount, 2000);

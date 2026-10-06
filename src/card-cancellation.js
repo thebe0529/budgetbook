@@ -2,6 +2,7 @@ import { canAccessAccount, member } from './members.js';
 import { assertDate } from './ledger.js';
 import { entryFingerprint } from './transaction-checks.js';
 import { calculateAmount } from './amount-expression.js';
+import { normalizeRefundDistribution, distributeCardRefund } from './card-refund-allocation.js';
 
 export function cardCancellationPreview(book, sub, planId) {
   const plan = book.cardPlan(planId);
@@ -88,13 +89,14 @@ export function cancelCardPurchase(book, sub, { planId, date, reason, expectedHa
   });
 }
 
-export function partiallyCancelCardPurchase(book, sub, { planId, date, reason, expectedHash, requestId, amountExpression }) {
+export function partiallyCancelCardPurchase(book, sub, { planId, date, reason, expectedHash, requestId, amountExpression, distributionMode, deductions }) {
   assertDate(date);
   if (typeof reason !== 'string' || !reason.trim() || reason.trim().length > 200) throw new Error('Cancellation reason required (up to 200 characters)');
   reason = reason.trim();
   if (typeof requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) throw new Error('Invalid cancellation request ID');
   const amount = calculateAmount(amountExpression);
   if (amount <= 0) throw new Error('Partial cancellation amount must be positive');
+  const distribution = normalizeRefundDistribution(distributionMode, deductions);
   return book.atomic(() => {
     const preview = cardCancellationPreview(book, sub, planId);
     const { plan, entry: original, allowed, hasPayments, remainingAmount, cancellation } = preview;
@@ -105,7 +107,9 @@ export function partiallyCancelCardPurchase(book, sub, { planId, date, reason, e
     const sent = book.db.prepare('SELECT data FROM card_partial_cancellations WHERE id = ?').get(requestId);
     if (sent) {
       const audit = JSON.parse(sent.data);
-      if (audit.planId !== planId || audit.actor !== sub || audit.date !== date || audit.reason !== reason || audit.amount !== amount || audit.expectedHash !== expectedHash) throw new Error('Cancellation request ID reused');
+      if (audit.planId !== planId || audit.actor !== sub || audit.date !== date || audit.reason !== reason || audit.amount !== amount || audit.expectedHash !== expectedHash ||
+        (audit.distributionMode ?? 'equal') !== distribution.distributionMode ||
+        JSON.stringify(audit.deductions ?? []) !== JSON.stringify(distribution.deductions)) throw new Error('Cancellation request ID reused');
       return { entry: JSON.parse(book.db.prepare('SELECT data FROM entries WHERE id = ?').get(audit.entryId).data), duplicate: true };
     }
     if (cancellation || plan.cancellationId) throw new Error('Card purchase already cancelled');
@@ -117,11 +121,10 @@ export function partiallyCancelCardPurchase(book, sub, { planId, date, reason, e
       sourceAccountId: plan.cardId, reversesEntryId: original.id, memo: `카드 부분취소 (${reason}): ${original.memo || original.id}`,
       postings: original.postings.map(p => ({ ...p, amount, side: p.side === 'debit' ? 'credit' : 'debit' })),
       ...(original.budgetAllocations ? { budgetAllocations: original.budgetAllocations.map(a => ({ ...a, amount: -amount })) } : {}) };
-    const remaining = remainingAmount - amount; const count = plan.installments.length;
-    const installments = plan.installments.map((item, i) => ({ ...item, amount: Math.floor(remaining / count) + (i < remaining % count ? 1 : 0) }));
+    const installments = distributeCardRefund(plan.installments, amount, distribution);
     book.record(entry);
     const audit = { requestId, planId, originalId: original.id, entryId: entry.id, date, amount, reason, expectedHash,
-      actor: sub, createdAt: new Date().toISOString(), beforeInstallments: plan.installments, afterInstallments: installments };
+      actor: sub, createdAt: new Date().toISOString(), beforeInstallments: plan.installments, afterInstallments: installments, ...distribution };
     book.db.prepare('INSERT INTO card_partial_cancellations (id, plan_id, original_id, entry_id, date, data) VALUES (?, ?, ?, ?, ?, ?)')
       .run(requestId, planId, original.id, entry.id, date, JSON.stringify(audit));
     book.db.prepare('UPDATE card_plans SET data = ? WHERE id = ?')

@@ -8,7 +8,7 @@ export const refundDistributionModes = [
 ];
 
 export function normalizeRefundDistribution(distributionMode = 'equal', deductions) {
-  if (!refundDistributionModes.some(([mode]) => mode === distributionMode)) throw new Error('Invalid refund distribution mode');
+  if (!refundDistributionModes.some(([mode]) => mode === distributionMode)) throw new Error('Invalid installment distribution mode');
   if (distributionMode !== 'manual') {
     if (deductions !== undefined && (!Array.isArray(deductions) || deductions.length)) throw new Error('Deductions require manual distribution');
     return { distributionMode, deductions: [] };
@@ -41,7 +41,7 @@ export function distributeCardRefund(installments, reduction, { distributionMode
       if (!Number.isSafeInteger(total)) throw new Error('Deduction total exceeds supported range');
       changes.set(deduction.index, installment.amount - deduction.amount);
     }
-    if (total !== reduction) throw new Error('Installment deductions must equal the unpaid refund reduction');
+    if (total !== reduction) throw new Error('Installment deductions must equal the installment reduction');
   } else if (distributionMode === 'equal') {
     const remaining = unpaidAmount - reduction;
     unpaid.forEach((item, i) => changes.set(item.index, Math.floor(remaining / unpaid.length) + (i < remaining % unpaid.length ? 1 : 0)));
