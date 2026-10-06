@@ -40,6 +40,117 @@ function partlyPaid(filename) {
 }
 const mixedRequest = (book, plan, amount = '2000') => ({ ...request(book, plan, amount), date: '2026-12-01', confirmUnpaidFirst: true });
 
+test('refund distribution can reduce earliest or latest unpaid installments without altering paid history or totals', () => {
+  for (const [distributionMode, amounts] of [['earliest-first', [4000, 0, 3000]], ['latest-first', [4000, 3000, 0]]]) {
+    const { book, plan } = partlyPaid();
+    try {
+      const before = book.cardPlan(plan.id); const input = { ...mixedRequest(book, plan, '5000'), distributionMode };
+      refundPaidCardPurchase(book, 'editor', input);
+      const after = book.cardPlan(plan.id);
+      assert.deepEqual(after.installments.map(item => item.amount), amounts);
+      assert.deepEqual(after.installments[0], before.installments[0]);
+      assert.deepEqual(after.installments.map(item => item.dueDate), before.installments.map(item => item.dueDate));
+      assert.equal(book.pendingCardPayments('9999-12-31').reduce((sum, item) => sum + item.amount, 0), 3000);
+      assert.equal(book.reports('2026-12-01', '2026-12-31').incomeStatement.expenses, -5000);
+      assert.equal(book.reports('2026-12-01', '2026-12-31').cashFlow.netChange, 0);
+      assert.equal(book.budget('2026-12').categories.food.spent, -5000);
+      assert.equal(cardRefundReceiptPreview(book, 'editor', input.requestId).receiptLimit, 0);
+      assert.equal(refundPaidCardPurchase(book, 'editor', input).duplicate, true);
+      assert.throws(() => refundPaidCardPurchase(book, 'editor', { ...input, distributionMode: 'equal' }), /reused/);
+      setCardCashDefault(book, 'owner', 'card', 'cash');
+      const projected = forecast(book, 'owner', { asOf: '2026-12-01', throughDate: '2027-02-28', useCardDefaults: true }).events.filter(e => e.type === 'card');
+      assert.equal(projected.length, 1); assert.equal(projected[0].amount, -3000);
+    } finally { book.close(); }
+  }
+});
+
+test('manual refund deductions persist canonical arithmetic, preserve replay after payment and reject altered allocations', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'refund-distribution-')); let book;
+  try {
+    const setup = partlyPaid(join(dir, 'book.sqlite')); book = setup.book;
+    const input = { ...mixedRequest(book, setup.plan, '3500'), distributionMode: 'manual',
+      deductions: [{ index: 3, amountExpression: '2000+500' }, { index: 2, amountExpression: '1000' }] };
+    refundPaidCardPurchase(book, 'editor', input);
+    assert.deepEqual(book.cardPlan(setup.plan.id).installments.map(i => i.amount), [4000, 3000, 1500]);
+    const audit = cardCancellationPreview(book, 'editor', setup.plan.id).refunds[0];
+    assert.deepEqual(audit.deductions, [{ index: 2, amount: 1000 }, { index: 3, amount: 2500 }]);
+    assert.equal(audit.distributionMode, 'manual');
+    recordCardPayment(book, 'editor', { planId: setup.plan.id, index: 2, date: '2026-12-02', cashId: 'cash', expectedAmount: 3000 });
+    book.close(); book = new Book(join(dir, 'book.sqlite'));
+    const equivalent = { ...input, deductions: [{ index: 2, amountExpression: '500*2' }, { index: 3, amountExpression: '2500' }] };
+    assert.equal(refundPaidCardPurchase(book, 'editor', equivalent).duplicate, true);
+    assert.throws(() => refundPaidCardPurchase(book, 'editor', { ...input, deductions: [{ index: 2, amountExpression: '500' }, { index: 3, amountExpression: '3000' }] }), /reused/);
+    refundPaidCardPurchase(book, 'editor', { ...mixedRequest(book, setup.plan, '1000'), date: '2026-12-03', distributionMode: 'latest-first' });
+    assert.equal(refundPaidCardPurchase(book, 'editor', equivalent).duplicate, true);
+    assert.equal(book.entries().length, 5);
+  } finally { book?.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('invalid manual deductions and stale distribution requests leave entries, plan and audits unchanged', () => {
+  const { book, plan } = partlyPaid();
+  try {
+    const before = book.cardPlan(plan.id); const input = { ...mixedRequest(book, plan), distributionMode: 'manual' };
+    const bad = [undefined, [], 'bad', [{ index: 2, amountExpression: '-1' }], [{ index: 2, amountExpression: '1/0' }],
+      [{ index: 1, amountExpression: '0' }, { index: 2, amountExpression: '2000' }], [{ index: 999, amountExpression: '2000' }],
+      [{ index: 2, amountExpression: '4001' }], [{ index: 2, amountExpression: '1999' }],
+      [{ index: 2, amountExpression: '1000' }, { index: 2, amountExpression: '1000' }],
+      [{ index: '2', amountExpression: '2000' }], Array.from({ length: 121 }, (_, i) => ({ index: i + 1, amountExpression: '0' }))];
+    for (const deductions of bad) assert.throws(() => refundPaidCardPurchase(book, 'editor', { ...input, deductions }));
+    assert.throws(() => refundPaidCardPurchase(book, 'editor', { ...input, distributionMode: 'unknown' }), /Invalid/);
+    assert.throws(() => refundPaidCardPurchase(book, 'editor', { ...input, distributionMode: 'latest-first', deductions: [{ index: 2, amountExpression: '2000' }] }), /require manual/);
+    assert.equal(book.entries().length, 2); assert.deepEqual(book.cardPlan(plan.id), before);
+    assert.equal(book.db.prepare('SELECT count(*) AS n FROM card_refunds').get().n, 0);
+    const stale = { ...input, deductions: [{ index: 2, amountExpression: '2000' }] };
+    recordCardPayment(book, 'editor', { planId: plan.id, index: 2, date: '2026-12-01', cashId: 'cash' });
+    assert.throws(() => refundPaidCardPurchase(book, 'editor', stale), /changed/);
+    assert.equal(book.entries().length, 3);
+  } finally { book.close(); }
+});
+
+test('manual installment deductions exclude the card credit and failed saves roll back the chosen schedule', () => {
+  const { book, plan } = partlyPaid();
+  try {
+    const input = { ...mixedRequest(book, plan, '10000'), distributionMode: 'manual',
+      deductions: [{ index: 2, amountExpression: '4000' }, { index: 3, amountExpression: '4000' }] };
+    const before = book.cardPlan(plan.id);
+    for (const table of ['card_refunds', 'card_plans']) {
+      book.db.exec(`CREATE TRIGGER fail_distribution BEFORE ${table === 'card_plans' ? 'UPDATE' : 'INSERT'} ON ${table} BEGIN SELECT RAISE(ABORT, 'distribution failure'); END`);
+      assert.throws(() => refundPaidCardPurchase(book, 'editor', input), /distribution failure/);
+      assert.equal(book.entries().length, 2); assert.deepEqual(book.cardPlan(plan.id), before);
+      book.db.exec('DROP TRIGGER fail_distribution');
+    }
+    refundPaidCardPurchase(book, 'editor', input);
+    assert.deepEqual(book.cardPlan(plan.id).installments.map(i => i.amount), [4000, 0, 0]);
+    assert.equal(cardRefundReceiptPreview(book, 'editor', input.requestId).receiptLimit, 2000);
+    assert.equal(cardCancellationPreview(book, 'editor', plan.id).remainingAmount, 2000);
+  } finally { book.close(); }
+});
+
+test('HTTP distribution choices and per-installment deductions enforce CSRF, confirmation and valid indexes', async () => {
+  const { book, plan } = partlyPaid(); let sub = 'editor';
+  const server = createImportApi(book, { auth: { session: () => ({ sub, role: sub, csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/cards`;
+  try {
+    const page = await (await fetch(`${base}/cancel?planId=${plan.id}`)).text();
+    assert.match(page, /value="latest-first"/); assert.match(page, /value="earliest-first"/); assert.match(page, /value="manual"/);
+    assert.match(page, /name="deduction:2"/); assert.doesNotMatch(page, /name="deduction:1"/);
+    const input = { ...mixedRequest(book, plan), csrf: 'token', confirmUnpaidFirst: 'true', distributionMode: 'manual',
+      'deduction:2': '500+500', 'deduction:3': '1000', reason: '<직접 & 배분>' };
+    const send = values => fetch(`${base}/refund`, { method: 'POST', body: new URLSearchParams(values) });
+    assert.equal((await send({ ...input, csrf: 'wrong' })).status, 403);
+    assert.equal((await send({ ...input, confirmUnpaidFirst: 'false' })).status, 400);
+    assert.equal((await send({ ...input, 'deduction:1': '0' })).status, 400);
+    assert.equal((await send({ ...input, 'deduction:3': '0' })).status, 400);
+    sub = 'viewer'; assert.equal((await send(input)).status, 400);
+    sub = 'editor'; const result = await send(input); assert.equal(result.status, 200);
+    const html = await result.text(); assert.match(html, /배분 방식: 회차별 차감액 직접 지정/); assert.match(html, /&lt;직접 &amp; 배분&gt;/);
+    assert.equal((await send(input)).status, 200);
+    assert.deepEqual(book.cardPlan(plan.id).installments.map(i => i.amount), [4000, 3000, 3000]);
+    assert.equal(book.entries().length, 3);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
 test('partly paid refund reduces only unpaid dues and preserves paid entries, budget history and dates', () => {
   const { book, plan } = partlyPaid();
   try {
@@ -190,7 +301,7 @@ test('legacy fully paid refunds keep their receipt limit and immutable schedule 
     const input = request(book, setup.plan); refundPaidCardPurchase(book, 'editor', input);
     const row = book.db.prepare('SELECT data FROM card_refunds WHERE id = ?').get(input.requestId);
     const audit = JSON.parse(row.data);
-    for (const key of ['unpaidReduction', 'creditAmount', 'beforeInstallments', 'afterInstallments', 'allocation']) delete audit[key];
+    for (const key of ['unpaidReduction', 'creditAmount', 'beforeInstallments', 'afterInstallments', 'allocation', 'distributionMode', 'deductions']) delete audit[key];
     book.db.prepare('UPDATE card_refunds SET data = ? WHERE id = ?').run(JSON.stringify(audit), input.requestId);
     book.db.exec(`DROP TRIGGER refunded_card_plan_update;
       CREATE TRIGGER refunded_card_plan_update BEFORE UPDATE ON card_plans
