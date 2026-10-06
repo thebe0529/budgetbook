@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { editableManual, recordSplitManual, updateSplitManual } from './split-manual.js';
 import { cardRefundReceiptPreview, recordCardRefundReceipt, cardRefundReceiptCandidates, linkCardRefundReceipt } from './card-refund-receipt.js';
 import { refundDistributionModes } from './card-refund-allocation.js';
+import { cardReductionPreview } from './card-reduction-preview.js';
 import { refundPaidCardPurchase } from './card-refund.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
 import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
@@ -728,6 +729,28 @@ function cardDistributionForm(form) {
       .map(([key, amountExpression]) => ({ index: /^deduction:[1-9]\d*$/.test(key) ? Number(key.slice(10)) : NaN, amountExpression })) : undefined };
 }
 
+function renderCardReductionPreview(book, session, kind, input) {
+  const result = cardReductionPreview(book, session.sub, kind, input);
+  const { plan, amount, unpaidReduction, creditAmount, remainingAfter, beforeInstallments, afterInstallments } = result;
+  const action = kind === 'partial' ? '/admin/cards/cancel-partial' : '/admin/cards/refund';
+  const fields = Object.entries(result.input).filter(([key]) => key !== 'deductions');
+  const hidden = fields.map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('') +
+    (result.input.deductions ?? []).map(item => `<input type="hidden" name="deduction:${item.index}" value="${escape(item.amountExpression)}">`).join('');
+  const rows = afterInstallments.map((item, i) => `<tr><td>${item.index}</td><td>${escape(item.dueDate)}</td><td>${item.paidEntryId ? '납부 보존' : item.amount === 0 ? '예정액·납부 제외' : '미납'}</td>
+    <td>${beforeInstallments[i].amount.toLocaleString('ko-KR')}원</td><td>${item.amount.toLocaleString('ko-KR')}원</td></tr>`).join('');
+  const needsConfirmation = kind === 'refund' && beforeInstallments.some(item => !item.paidEntryId && item.amount > 0);
+  return page('카드 취소·환불 미리보기', `<p class="notice">아직 저장하지 않았습니다. 아래 내용을 확인한 뒤 저장하세요.</p>
+    <p>카드: ${escape(book.accounts().get(plan.cardId).name)} · 처리일: ${escape(result.input.date)} · 사유: ${escape(result.input.reason)}</p>
+    <p>취소·환불액 ${amount.toLocaleString('ko-KR')}원 · 미납 감소 ${unpaidReduction.toLocaleString('ko-KR')}원 · 카드대금 차감 ${creditAmount.toLocaleString('ko-KR')}원 · 처리 후 남은 구매 금액 ${remainingAfter.toLocaleString('ko-KR')}원</p>
+    <p>계좌 입금 기록 한도: ${creditAmount.toLocaleString('ko-KR')}원입니다. 지금 은행 입금을 기록하지 않습니다. 비용·예산은 처리일에 ${amount.toLocaleString('ko-KR')}원을 되돌립니다.</p>
+    <p>배분 방식: ${escape(refundDistributionModes.find(([mode]) => mode === result.input.distributionMode)[1])}</p>
+    <table><tr><th>회차</th><th>예정일</th><th>처리 후 상태</th><th>현재 금액</th><th>처리 후 금액</th></tr>${rows}</table>
+    <form method="post" action="${action}"><input type="hidden" name="csrf" value="${escape(session.csrf)}">${hidden}
+    ${needsConfirmation ? '<label><input type="checkbox" name="confirmUnpaidFirst" value="true" style="width:auto" required>미납 우선 처리와 위 회차 배분이 실제 카드사 처리와 일치함을 확인했습니다.</label>' : ''}
+    <button>이 내용으로 저장</button></form><p>저장할 때 권한·기간 잠금·거래 변경 여부를 다시 확인합니다.</p>
+    <p><a href="/admin/cards/cancel?planId=${encodeURIComponent(plan.id)}">구매 상세로 돌아가기</a></p>`);
+}
+
 function renderCardCancellation(book, session, planId, message = '') {
   const { plan, entry, allowed, hasPayments, expectedHash, cancellation, partials, remainingAmount, refunds, unpaidAmount, minimumRefundDate } = cardCancellationPreview(book, session.sub, planId);
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
@@ -744,7 +767,7 @@ function renderCardCancellation(book, session, planId, message = '') {
     <label>환불 사유</label><input name="reason" maxlength="200" required>
     ${unpaidAmount > 0 ? `${renderCardDistributionFields(plan.installments, '환불액과 미납 예정액 중 작은 금액')}
       <label><input type="checkbox" name="confirmUnpaidFirst" value="true" style="width:auto" required>미납 우선 처리와 선택한 회차 배분 방식이 실제 카드 취소·환불과 일치함을 확인했습니다.</label>` : ''}
-    <button>카드 취소·환불 기록</button></form>`;
+    <button formaction="/admin/cards/refund/preview" formnovalidate>회차 변경 미리보기</button><button>카드 취소·환불 기록</button></form>`;
   const state = cancellation ? `<h2>취소 이력</h2>
     <p>취소일: ${escape(cancellation.date)} · 취소자: ${escape(cancellation.actor)} · 처리 시각: ${escape(cancellation.createdAt)} (UTC)</p>
     <p>사유: ${escape(cancellation.reason)} · 취소 금액: ${(cancellation.amount ?? amount).toLocaleString('ko-KR')}원</p><p>취소 분개: ${escape(cancellation.reversalId)}</p>` : hasPayments ? refundForm : !allowed ?
@@ -760,7 +783,7 @@ function renderCardCancellation(book, session, planId, message = '') {
     <label>부분취소일</label><input type="date" name="date" min="${escape(minimumDate)}" value="${today < minimumDate ? minimumDate : today}" required>
     <label>취소 금액 (사칙연산 가능)</label><input name="amountExpression" maxlength="256" required>
     <label>취소 사유</label><input name="reason" maxlength="200" required>
-    ${renderCardDistributionFields(plan.installments, '부분취소 금액')}<button>미결제 구매 부분취소</button></form>`;
+    ${renderCardDistributionFields(plan.installments, '부분취소 금액')}<button formaction="/admin/cards/cancel-partial/preview">회차 변경 미리보기</button><button>미결제 구매 부분취소</button></form>`;
   const partialHistory = partials.length ? `<h2>부분취소 이력</h2><table><tr><th>취소일</th><th>금액·배분</th><th>사유</th><th>작업자·UTC 시각</th><th>취소 분개</th></tr>${partials.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원${renderCardDistributionHistory(a)}</td><td>${escape(a.reason)}</td><td>${escape(a.actor)} · ${escape(a.createdAt)}</td><td>${escape(a.entryId)}</td></tr>`).join('')}</table>` : '';
   const refundHistory = refunds.length ? `<h2>카드대금 차감 환불 이력</h2><table><tr><th>환불일</th><th>금액·배분</th><th>사유</th><th>작업자·UTC 시각</th><th>환불 분개</th><th>계좌 입금</th></tr>${refunds.map(a => `<tr><td>${escape(a.date)}</td><td>${a.amount.toLocaleString('ko-KR')}원<br>미납 감소 ${(a.unpaidReduction ?? 0).toLocaleString('ko-KR')}원 / 카드대금 차감 ${(a.creditAmount ?? a.amount).toLocaleString('ko-KR')}원
       ${renderCardDistributionHistory(a)}</td><td>${escape(a.reason)}</td><td>${escape(a.actor)} · ${escape(a.createdAt)}</td><td>${escape(a.entryId)}</td><td><a href="/admin/cards/refund-receipt?refundId=${encodeURIComponent(a.requestId)}">입금 기록·이력</a></td></tr>`).join('')}</table>` : '';
@@ -1243,6 +1266,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         requestId: form.get('requestId'), expectedHash: form.get('expectedHash') });
       sendHtml(res, 200, renderCardRefundReceipt(book, session, form.get('refundId'),
         `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 카드 환불금 계좌 입금입니다.</p>`)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/cards/refund/preview', '/admin/cards/cancel-partial/preview'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const kind = pathname === '/admin/cards/refund/preview' ? 'refund' : 'partial';
+      sendHtml(res, 200, renderCardReductionPreview(book, session, kind, { planId: form.get('planId'), date: form.get('date'),
+        reason: form.get('reason'), expectedHash: form.get('expectedHash'), requestId: form.get('requestId'),
+        amountExpression: form.get('amountExpression'), ...cardDistributionForm(form) })); return true;
     }
     if (req.method === 'POST' && pathname === '/admin/cards/refund') {
       const form = await formBody(req);
