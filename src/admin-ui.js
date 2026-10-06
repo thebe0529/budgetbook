@@ -12,6 +12,7 @@ import { editableManual, recordSplitManual, updateSplitManual } from './split-ma
 import { cardRefundReceiptPreview, recordCardRefundReceipt, cardRefundReceiptCandidates, linkCardRefundReceipt } from './card-refund-receipt.js';
 import { refundDistributionModes } from './card-refund-allocation.js';
 import { cardReductionPreview } from './card-reduction-preview.js';
+import { compareCardStatement, saveCardStatementComparison, cardStatementHistory } from './card-statement.js';
 import { refundPaidCardPurchase } from './card-refund.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
 import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
@@ -828,6 +829,40 @@ function renderCardRefundReceipt(book, session, refundId, message = '') {
     <p><a href="/admin/cards/cancel?planId=${encodeURIComponent(plan.id)}">구매 취소·환불 이력으로 돌아가기</a></p>`);
 }
 
+function renderCardStatementRows(rows) {
+  return rows.map(row => `<tr><td>${escape(row.dueDate)}</td><td><a href="/admin/cards/cancel?planId=${encodeURIComponent(row.planId)}">${escape(row.memo || row.planId)}</a></td>
+    <td>${row.index}</td><td>${row.amount.toLocaleString('ko-KR')}원</td><td>${row.paidEntryId ? `납부 기록 있음 (${escape(row.paymentDate)})` : '미납'}</td></tr>`).join('');
+}
+
+function renderCardStatement(book, session, input = {}, message = '') {
+  const cards = [...book.accounts().values()].filter(a => a.card && a.type === 'liability' && canAccessAccount(book, session.sub, a.id));
+  if (!cards.length) return page('카드 월별 청구 대사', '<p>조회 가능한 카드가 없습니다.</p>');
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  const fields = { cardId: input.cardId ?? cards[0].id, month: input.month ?? today.slice(0, 7),
+    statementExpression: input.statementExpression ?? '0', adjustmentExpression: input.adjustmentExpression ?? '0', adjustmentReason: input.adjustmentReason ?? '' };
+  const comparison = compareCardStatement(book, session.sub, fields);
+  const money = value => value.toLocaleString('ko-KR');
+  const history = cardStatementHistory(book, session.sub, fields.cardId, fields.month);
+  const hidden = Object.entries(fields).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('');
+  return page('카드 월별 청구 대사', `${message}<p>결제 예정일이 조회 월인 회차를 합산하며 이미 납부한 회차도 포함합니다. 취소 구매와 0원 회차는 제외합니다. 실제 납부일 기준 원장 잔액 대사와는 계산 기준이 다릅니다.</p>
+    <p>수수료·다음 청구 차감 환불 등 회차에 없는 금액은 비교 조정액과 사유에 직접 입력하세요. 조정액은 비교 계산에만 사용하며 원장·예산·납부 예정액을 변경하지 않습니다. 금액 일치는 회차별 거래 확인 완료를 뜻하지 않습니다.</p>
+    <form method="get" action="/admin/cards/statement"><label>카드</label><select name="cardId">${cards.map(card => `<option value="${escape(card.id)}"${card.id === fields.cardId ? ' selected' : ''}>${escape(card.name)}</option>`).join('')}</select>
+    <label>결제 예정 월</label><input type="month" name="month" max="9999-12" value="${escape(fields.month)}" required>
+    <label>실제 청구서 금액 (사칙연산 가능)</label><input name="statementExpression" maxlength="256" value="${escape(fields.statementExpression)}" required>
+    <label>비교 조정액 (수수료 + / 청구 차감 환불 −)</label><input name="adjustmentExpression" maxlength="256" value="${escape(fields.adjustmentExpression)}" required>
+    <label>조정 사유 (조정액이 0원이 아니면 필수)</label><input name="adjustmentReason" maxlength="200" value="${escape(fields.adjustmentReason)}"><button>비교</button></form>
+    <p>회차 예정액 ${money(comparison.scheduledTotal)}원 = 납부 기록 ${money(comparison.paidTotal)}원 + 미납 ${money(comparison.pendingTotal)}원</p>
+    <p>예정액 ${money(comparison.scheduledTotal)}원 + 비교 조정 ${money(comparison.adjustmentAmount)}원 = 비교 기준 ${money(comparison.expectedAmount)}원 · 실제 청구 ${money(comparison.statementAmount)}원</p>
+    <p class="${comparison.difference === 0 ? 'notice' : 'error'}">청구서 − 비교 기준 차이: ${money(comparison.difference)}원 (${comparison.difference === 0 ? '금액 일치' : comparison.difference > 0 ? '청구서가 더 큼' : '청구서가 더 작음'})</p>
+    <table><tr><th>예정일</th><th>구매</th><th>회차</th><th>예정액</th><th>납부 기록</th></tr>${renderCardStatementRows(comparison.rows) || '<tr><td colspan="5">해당 월 회차가 없습니다.</td></tr>'}</table>
+    ${canAccessAccount(book, session.sub, fields.cardId, 'write') ? `<form method="post" action="/admin/cards/statement">${hidden}<input type="hidden" name="csrf" value="${escape(session.csrf)}">
+      <input type="hidden" name="expectedHash" value="${escape(comparison.stateHash)}"><input type="hidden" name="requestId" value="${randomUUID()}"><button>현재 비교 내역 저장</button></form>` : '<p>비교 저장에는 카드 쓰기 권한이 필요합니다.</p>'}
+    <h2>이 카드·월의 비교 이력 (최근 20건)</h2>${history.map(saved => `<details><summary>${escape(saved.savedAt)} (UTC) · 차이 ${money(saved.difference)}원 · ${saved.changed ? '저장 후 내역 변경됨' : '저장 당시 내역 유지'}</summary>
+      <p>작업자: ${escape(saved.actor)} · 저장 당시 카드: ${escape(saved.card.name)} · 회차 예정액 ${money(saved.scheduledTotal)}원 · 비교 조정 ${money(saved.adjustmentAmount)}원 (${escape(saved.adjustmentReason || '없음')}) · 실제 청구 ${money(saved.statementAmount)}원</p>
+      <table><tr><th>당시 예정일</th><th>구매</th><th>회차</th><th>당시 금액</th><th>당시 납부 기록</th></tr>${renderCardStatementRows(saved.rows)}</table></details>`).join('') || '<p>저장한 비교가 없습니다.</p>'}
+    <p><a href="/admin/cards">카드 예정액으로 돌아가기</a></p>`);
+}
+
 function renderCards(book, session, throughDate, message = '', preview = {}) {
   assertDate(throughDate);
   const accounts = [...book.accounts().values()];
@@ -897,7 +932,9 @@ function renderCards(book, session, throughDate, message = '', preview = {}) {
     <td><a href="/admin/cards/cancel?planId=${encodeURIComponent(item.plan.id)}">${item.cancellation ? '취소 이력' : item.fullyPaid ? '환불·이력' : item.allowed && !item.hasPayments ? '전체 취소' : '구매 상세'}</a></td></tr>`).join('');
   const purchaseList = `<h2>카드 구매 내역</h2><p>조회 종료일과 무관하게 접근 가능한 최근 등록 구매 최대 200건을 표시합니다. 모든 회차가 미결제인 구매만 전체 취소할 수 있습니다.</p>
     <table><tr><th>구매일</th><th>카드</th><th>메모</th><th>상태</th><th>상세·취소</th></tr>${purchases || '<tr><td colspan="5">카드 구매 내역이 없습니다.</td></tr>'}</table>`;
-  return page('카드 예정액', `${message}${previewForm}${purchase}${defaults}${billing}${purchaseList}<h2>미결제 할부 예정액</h2>
+  const statementLinks = accounts.filter(a => a.card && a.type === 'liability' && canAccessAccount(book, session.sub, a.id))
+    .map(card => `<a href="/admin/cards/statement?${escape(new URLSearchParams({ cardId: card.id, month: throughDate.slice(0, 7) }).toString())}">${escape(card.name)} 월별 청구 대사</a>`).join(' · ');
+  return page('카드 예정액', `${message}<p>${statementLinks}</p>${previewForm}${purchase}${defaults}${billing}${purchaseList}<h2>미결제 할부 예정액</h2>
     <form method="get" action="/admin/cards"><label>조회 종료일</label>
     <input type="date" name="throughDate" value="${escape(throughDate)}"><button>조회</button></form>
     <table><tr><th>월</th><th>결제 예정액</th></tr>${months}</table>
@@ -1241,6 +1278,18 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         message = rule ? `<p class="notice">첫 결제 예정일: ${escape(firstCardDueDate(preview.date, rule))} (주말: ${escape(({ none: '조정 없음', next: '다음 평일', previous: '이전 평일' })[rule.weekendAdjustment ?? 'none'])}, 공휴일 조정 없음)</p>` : '<p class="error">청구 규칙을 설정하거나 첫 결제 예정일을 직접 입력하세요.</p>';
       }
       sendHtml(res, 200, renderCards(book, session, throughDate, message, preview)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/cards/statement') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      sendHtml(res, 200, renderCardStatement(book, session, Object.fromEntries(['cardId', 'month', 'statementExpression', 'adjustmentExpression', 'adjustmentReason']
+        .filter(key => query.has(key)).map(key => [key, query.get(key)])))); return true;
+    }
+    if (req.method === 'POST' && pathname === '/admin/cards/statement') {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const input = Object.fromEntries(['cardId', 'month', 'statementExpression', 'adjustmentExpression', 'adjustmentReason', 'expectedHash', 'requestId'].map(key => [key, form.get(key) ?? undefined]));
+      const result = saveCardStatementComparison(book, session.sub, input);
+      sendHtml(res, 200, renderCardStatement(book, session, input, `<p class="notice">${result.duplicate ? '이미 저장한' : '저장한'} 카드 청구 비교입니다.</p>`)); return true;
     }
     if (req.method === 'GET' && pathname === '/admin/cards/cancel') {
       sendHtml(res, 200, renderCardCancellation(book, session, new URL(req.url, 'http://localhost').searchParams.get('planId'))); return true;

@@ -73,6 +73,9 @@ export class Book {
       CREATE TABLE IF NOT EXISTS card_refunds (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL,
         original_id TEXT NOT NULL, entry_id TEXT NOT NULL UNIQUE, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS card_refund_plan ON card_refunds(plan_id);
+      CREATE TABLE IF NOT EXISTS card_statement_comparisons (id TEXT PRIMARY KEY, card_id TEXT NOT NULL,
+        month TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS card_statement_month ON card_statement_comparisons(card_id, month);
       CREATE TABLE IF NOT EXISTS card_refund_receipts (id TEXT PRIMARY KEY, refund_id TEXT NOT NULL,
         entry_id TEXT NOT NULL UNIQUE, date TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS card_receipt_refund ON card_refund_receipts(refund_id);
