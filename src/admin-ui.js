@@ -26,6 +26,7 @@ import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
 import { budgetMonthMovePreview, moveBudgetMonth, budgetMonthMoves } from './budget-month-moves.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
+import { budgetSavingsPreview, fillBudgetSavings, setBudgetSavingsTarget, budgetSavingsFills } from './budget-savings.js';
 import { budgetOverspending, budgetCategoryActivity, budgetCategoryActivityCsv, budgetActivityFilters, budgetActivitySortOptions } from './budget-alerts.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage, registerSortOptions } from './register-view.js';
@@ -649,7 +650,19 @@ function renderBudget(book, session, month, message = '') {
   const preview = previousBudgetPreview(book, session.sub, month);
   const targetPreview = budgetTargetPreview(book, session.sub, month);
   const targets = new Map(targetPreview.rows.map(row => [row.categoryId, row]));
+  const savings = budgetSavingsPreview(book, session.sub, month);
+  const savingsTargets = new Map(savings.rows.map(row => [row.categoryId, row]));
   const categories = book.budgetCategories();
+  const savingsRows = [...categories.values()].map(category => {
+    const goal = savingsTargets.get(category.id);
+    return `<tr><td>${escape(category.name)}</td><td>${budget.categories[category.id].balance.toLocaleString('ko-KR')}원</td><td><form method="post" action="/admin/budget/savings-target">
+      <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="categoryId" value="${escape(category.id)}">
+      <input name="amountExpression" aria-label="${escape(category.name)} 저축 잔액 목표" value="${goal?.target ?? 0}" maxlength="256" required><button>잔액 목표 저장</button></form></td>
+      <td>${(goal?.needed ?? 0).toLocaleString('ko-KR')}원</td><td>${(goal?.afterBudgeted ?? budget.categories[category.id].budgeted).toLocaleString('ko-KR')}원</td></tr>`;
+  }).join('');
+  const savingsHistory = budgetSavingsFills(book, session.sub, month).map(fill => `<details><summary>${escape(fill.createdAt)} (UTC) · ${fill.count}항목 · ${fill.total.toLocaleString('ko-KR')}원</summary>
+    <p>작업자: ${escape(fill.actor)} · 요청 ID: ${escape(fill.id)} · 미배정 자금 ${fill.readyToAssign.toLocaleString('ko-KR')} → ${fill.afterReadyToAssign.toLocaleString('ko-KR')}원. 아래는 배정 당시 내역입니다.</p>
+    <table><tr><th>당시 항목·잔액 목표</th><th>잔액 전 → 후</th><th>추가 배정</th><th>월 배정 전 → 후</th></tr>${fill.rows.map(row => `<tr><td>${escape(row.name)} · ${row.target.toLocaleString('ko-KR')}원</td><td>${row.balance.toLocaleString('ko-KR')} → ${row.afterBalance.toLocaleString('ko-KR')}원</td><td>${row.needed.toLocaleString('ko-KR')}원</td><td>${row.budgeted.toLocaleString('ko-KR')} → ${row.afterBudgeted.toLocaleString('ko-KR')}원</td></tr>`).join('')}</table></details>`).join('');
   const options = [...categories.values()].map(c => `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
   const moves = budgetMoves(book, session.sub, month).map(move => `<tr><td>${escape(move.createdAt)}</td>
     <td>${escape(categories.get(move.payload.fromCategoryId)?.name ?? move.payload.fromCategoryId)}</td>
@@ -694,6 +707,14 @@ function renderBudget(book, session, month, message = '') {
       <input type="hidden" name="requestId" value="${randomUUID()}">
       <p>목표 부족액 합계 ${targetPreview.total.toLocaleString('ko-KR')}원 · 채운 후 미배정 자금 ${(budget.readyToAssign - targetPreview.total).toLocaleString('ko-KR')}원</p>
       <button ${targetPreview.total > 0 ? '' : 'disabled'}>이번 달 목표 부족액 채우기</button></form>
+    <h2>저축 잔액 목표</h2><p>조회 월의 이월 포함 잔액이 목표에 도달하도록 부족액을 이번 달 배정액에 더합니다. 음수 이월은 먼저 보충하고 이미 목표 이상이면 줄이지 않습니다. 0원으로 저장하면 목표를 해제합니다. 목표는 다른 월에도 적용되며 자동 배정이나 실제 은행 이체는 하지 않습니다.</p>
+    <p>매월 배정 목표와 별도로 계산합니다. 한쪽에서 배정하면 다시 조회해 부족액을 확인하세요.</p>
+    <table><tr><th>카테고리</th><th>현재 이월 포함 잔액</th><th>잔액 목표</th><th>추가 배정 필요</th><th>채운 후 월 배정액</th></tr>${savingsRows}</table>
+    <form method="post" action="/admin/budget/fill-savings"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(savings.expectedHash)}">
+    <p>잔액 목표 부족액 합계 ${savings.total.toLocaleString('ko-KR')}원 · 채운 후 미배정 자금 ${savings.afterReadyToAssign.toLocaleString('ko-KR')}원</p>
+    ${savings.total > 0 && savings.afterReadyToAssign < 0 ? '<p class="error">잔액 목표를 모두 채우면 미배정 자금이 음수가 됩니다. 배정액과 가용 자금을 확인하세요.</p>' : ''}
+    <button ${savings.total > 0 ? '' : 'disabled'}>저축 잔액 목표 부족액 채우기</button></form>
+    <h3>이번 달 잔액 목표 배정 이력 (최근 20건)</h3>${savingsHistory || '<p>잔액 목표 배정 이력이 없습니다.</p>'}
     <h2 id="budget-move">카테고리 간 예산 이동</h2><p>이번 달 배정액 안에서 이동합니다. 총 배정액은 유지하며, 지출과 이월액은 이동하지 않습니다.</p>
     <form method="post" action="/admin/budget/move">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}">
@@ -1753,6 +1774,23 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       sendHtml(res, 200, renderBudget(book, session, month,
         `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 예산 이동: ${result.payload.amount.toLocaleString('ko-KR')}원</p>`));
       return true;
+    }
+    if (req.method === 'POST' && ['/admin/budget/savings-target', '/admin/budget/fill-savings'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const month = form.get('month'); assertMonth(month);
+      let message;
+      if (pathname.endsWith('/savings-target')) {
+        book.atomic(() => {
+          setBudgetSavingsTarget(book, session.sub, form.get('categoryId'), form.get('amountExpression'));
+          budgetSavingsPreview(book, session.sub, month);
+        });
+        message = '저축 잔액 목표를 저장했습니다.';
+      } else {
+        const result = fillBudgetSavings(book, session.sub, month, form.get('requestId'), form.get('expectedHash'));
+        message = `${result.duplicate ? '이미 처리한' : '처리한'} 잔액 목표 배정: ${result.count}항목, ${result.total.toLocaleString('ko-KR')}원`;
+      }
+      sendHtml(res, 200, renderBudget(book, session, month, `<p class="notice">${escape(message)}</p>`)); return true;
     }
     if (req.method === 'POST' && ['/admin/budget/target', '/admin/budget/fill-targets'].includes(pathname)) {
       const form = await formBody(req);
