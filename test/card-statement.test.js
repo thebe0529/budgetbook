@@ -9,7 +9,7 @@ import { ensureOwner, setMember } from '../src/members.js';
 import { recordCardPurchase, recordCardPayment } from '../src/card-manual.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase } from '../src/card-cancellation.js';
 import { refundPaidCardPurchase } from '../src/card-refund.js';
-import { cardMonthlySchedule, compareCardStatement, saveCardStatementComparison, cardStatementHistory } from '../src/card-statement.js';
+import { cardMonthlySchedule, compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey } from '../src/card-statement.js';
 import { createImportApi } from '../src/import-api.js';
 
 function fixture(filename) {
@@ -102,7 +102,8 @@ test('partial allocation updates monthly comparisons and zero installments disap
 test('comparison audit failure rolls back and snapshots, permissions and request receipts survive reopen', () => {
   const dir = mkdtempSync(join(tmpdir(), 'card-statement-')); let book;
   try {
-    const setup = fixture(join(dir, 'book.sqlite')); book = setup.book; const input = request(book);
+    const setup = fixture(join(dir, 'book.sqlite')); book = setup.book;
+    const input = request(book, { reviewedRows: [cardStatementRowKey(preview(book).rows[0])] });
     book.db.exec("CREATE TRIGGER fail_card_comparison BEFORE INSERT ON card_statement_comparisons BEGIN SELECT RAISE(ABORT, 'comparison failure'); END");
     assert.throws(() => saveCardStatementComparison(book, 'editor', input), /comparison failure/);
     assert.equal(cardStatementHistory(book, 'viewer', 'card', '2026-11').length, 0); assert.equal(book.entries().length, 2);
@@ -110,6 +111,7 @@ test('comparison audit failure rolls back and snapshots, permissions and request
     book.close(); book = new Book(join(dir, 'book.sqlite'));
     assert.equal(saveCardStatementComparison(book, 'editor', input).duplicate, true);
     assert.equal(cardStatementHistory(book, 'viewer', 'card', '2026-11')[0].changed, false);
+    assert.deepEqual(cardStatementHistory(book, 'viewer', 'card', '2026-11')[0].reviewedRows, input.reviewedRows);
     setMember(book, 'owner', 'editor', 'editor', []);
     assert.throws(() => saveCardStatementComparison(book, 'editor', input), /write access/);
     setMember(book, 'owner', 'viewer', 'viewer', []);
@@ -123,22 +125,83 @@ test('HTTP monthly comparison protects private cards, escapes live and saved det
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}/admin/cards`;
   try {
-    const data = { ...request(book), csrf: 'token', adjustmentExpression: '0', adjustmentReason: '<조정 & 확인>' };
+    const rowKey = cardStatementRowKey(preview(book).rows[0]);
+    const data = { ...request(book), csrf: 'token', adjustmentExpression: '0', adjustmentReason: '<조정 & 확인>', reviewedRow: rowKey };
     const get = query => fetch(`${base}/statement?${new URLSearchParams(query)}`);
     const post = values => fetch(`${base}/statement`, { method: 'POST', body: new URLSearchParams(values) });
     const count = book.db.prepare('SELECT total_changes() AS n').get().n;
     const html = await (await get({ cardId: 'card', month: '2026-11', statementExpression: '4000' })).text();
     assert.match(html, /금액 일치/); assert.match(html, /&lt;공유 &amp; 카드&gt;/); assert.match(html, /&lt;구매 &amp; 메모&gt;/);
+    assert.match(html, /type="checkbox" name="reviewedRow"/); assert.doesNotMatch(html, / checked/);
     assert.doesNotMatch(html, /비공개 출금 은행|비공개 카드|비공개 구매/);
     assert.equal(book.db.prepare('SELECT total_changes() AS n').get().n, count);
     assert.equal((await get({ cardId: 'private', month: '2026-11' })).status, 400);
     assert.equal((await post({ ...data, csrf: 'bad' })).status, 403);
+    assert.equal((await post({ ...data, reviewedRow: JSON.stringify(['private', 1]) })).status, 400);
+    const duplicateRows = new URLSearchParams(data); duplicateRows.append('reviewedRow', rowKey);
+    assert.equal((await post(duplicateRows)).status, 400);
     sub = 'viewer'; assert.equal((await post(data)).status, 400);
     const readonly = await (await get({ cardId: 'card', month: '2026-11' })).text(); assert.doesNotMatch(readonly, /method="post" action="\/admin\/cards\/statement"/);
-    sub = 'editor'; const result = await post(data); assert.equal(result.status, 200); assert.match(await result.text(), /&lt;조정 &amp; 확인&gt;/);
+    assert.doesNotMatch(readonly, /type="checkbox" name="reviewedRow"/);
+    sub = 'editor'; const result = await post(data); assert.equal(result.status, 200);
+    const savedHtml = await result.text(); assert.match(savedHtml, /&lt;조정 &amp; 확인&gt;/); assert.match(savedHtml, /회차 확인 1\/1건/);
+    assert.match(savedHtml, /당시 확인한 회차 금액 4,000원 · 미확인 0건/); assert.doesNotMatch(savedHtml, / checked/);
+    assert.equal((await post({ ...data, reviewedRow: '' })).status, 400);
     assert.equal((await post(data)).status, 200); assert.equal(book.entries().length, 2);
     pay(book, plan); assert.equal((await post({ ...data, requestId: randomUUID() })).status, 400);
     const changed = await (await get({ cardId: 'card', month: '2026-11' })).text(); assert.match(changed, /저장 후 내역 변경됨/);
     assert.match(await (await fetch(`${base}?throughDate=2026-11-30`)).text(), /월별 청구 대사/);
   } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
+});
+
+test('statement row reviews allow partial checks, normalize order and reject forged or duplicate selections without ledger effects', () => {
+  const { book, purchase } = fixture();
+  try {
+    recordCardPurchase(book, 'editor', { ...purchase, requestId: randomUUID(), amountExpression: '6000' });
+    const rows = preview(book).rows; const keys = rows.map(cardStatementRowKey);
+    const before = book.entries(); const reports = book.reports('2026-10-01', '2026-12-31');
+    const partial = saveCardStatementComparison(book, 'editor', request(book, { reviewedRows: [keys[0]] })).saved;
+    assert.equal(partial.reviewedTotal, rows[0].amount); assert.equal(partial.unreviewedCount, 1);
+    const input = request(book, { reviewedRows: keys });
+    const full = saveCardStatementComparison(book, 'editor', input).saved;
+    assert.deepEqual(full.reviewedRows, [...keys].sort()); assert.equal(full.reviewedTotal, 6000); assert.equal(full.unreviewedCount, 0);
+    assert.equal(full.difference, -2000); // Row checks do not conceal a mismatched statement total.
+    assert.equal(saveCardStatementComparison(book, 'editor', { ...input, reviewedRows: [...keys].reverse() }).duplicate, true);
+    assert.throws(() => saveCardStatementComparison(book, 'editor', { ...input, reviewedRows: [keys[0]] }), /reused/);
+    for (const reviewedRows of [null, keys[0], [keys[0], keys[0]], [JSON.stringify(['private', 1])], [JSON.stringify([rows[0].planId, 2])], [1], ['not-json']]) {
+      assert.throws(() => saveCardStatementComparison(book, 'editor', request(book, { reviewedRows })), /Invalid reviewed/);
+    }
+    assert.equal(cardStatementHistory(book, 'viewer', 'card', '2026-11').length, 2);
+    assert.deepEqual(book.entries(), before); assert.deepEqual(book.reports('2026-10-01', '2026-12-31'), reports);
+  } finally { book.close(); }
+});
+
+test('reviewed snapshot replay survives cancelled rows while new comparisons never inherit prior checks', () => {
+  const { book, plan } = fixture();
+  try {
+    const input = request(book, { reviewedRows: [cardStatementRowKey(preview(book).rows[0])] });
+    saveCardStatementComparison(book, 'editor', input);
+    cancelCardPurchase(book, 'editor', reduction(book, plan, '12000', '2026-10-21'));
+    assert.equal(saveCardStatementComparison(book, 'editor', input).duplicate, true);
+    assert.throws(() => saveCardStatementComparison(book, 'editor', { ...input, requestId: randomUUID() }), /changed/);
+    const history = cardStatementHistory(book, 'viewer', 'card', '2026-11');
+    assert.equal(history[0].changed, true); assert.equal(history[0].reviewedTotal, 4000); assert.equal(history[0].unreviewedCount, 0);
+    const fresh = saveCardStatementComparison(book, 'editor', request(book)).saved;
+    assert.deepEqual(fresh.reviewedRows, []); assert.equal(fresh.reviewedTotal, 0); assert.equal(fresh.unreviewedCount, 0);
+    assert.throws(() => saveCardStatementComparison(book, 'editor', request(book, { reviewedRows: input.reviewedRows })), /Invalid reviewed/);
+  } finally { book.close(); }
+});
+
+test('legacy comparisons without row reviews retain unchecked replay and cannot acquire checks under the same request ID', () => {
+  const { book } = fixture();
+  try {
+    const input = request(book); const { saved } = saveCardStatementComparison(book, 'editor', input);
+    delete saved.reviewedRows; delete saved.reviewedTotal; delete saved.unreviewedCount;
+    book.db.prepare('UPDATE card_statement_comparisons SET data = ? WHERE id = ?').run(JSON.stringify(saved), saved.id);
+    assert.equal(saveCardStatementComparison(book, 'editor', input).duplicate, true);
+    assert.throws(() => saveCardStatementComparison(book, 'editor', { ...input, reviewedRows: [cardStatementRowKey(saved.rows[0])] }), /reused/);
+    const fresh = saveCardStatementComparison(book, 'editor', request(book)).saved;
+    assert.deepEqual(fresh.reviewedRows, []); assert.equal(fresh.unreviewedCount, 1);
+    assert.equal(cardStatementHistory(book, 'viewer', 'card', '2026-11')[1].reviewedRows, undefined);
+  } finally { book.close(); }
 });

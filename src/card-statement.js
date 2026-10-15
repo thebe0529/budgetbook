@@ -3,6 +3,15 @@ import { canAccessAccount } from './members.js';
 import { calculateAmount } from './amount-expression.js';
 import { entryFingerprint } from './transaction-checks.js';
 
+export const cardStatementRowKey = row => JSON.stringify([row.planId, row.index]);
+
+function normalizeReviewedRows(values = [], rows) {
+  const allowed = new Set(rows.map(cardStatementRowKey));
+  if (!Array.isArray(values) || values.length > rows.length || values.some(value => typeof value !== 'string' || !allowed.has(value)) ||
+    new Set(values).size !== values.length) throw new Error('Invalid reviewed card statement rows');
+  return [...values].sort();
+}
+
 export function cardMonthlySchedule(book, sub, cardId, month) {
   assertMonth(month);
   const card = book.accounts().get(cardId);
@@ -61,10 +70,17 @@ export function saveCardStatementComparison(book, sub, input) {
       if (saved.actor !== sub || saved.card.id !== cardId || saved.month !== month || saved.stateHash !== expectedHash ||
         saved.statementAmount !== comparison.statementAmount || saved.adjustmentAmount !== comparison.adjustmentAmount ||
         saved.adjustmentReason !== comparison.adjustmentReason) throw new Error('Card comparison request ID reused');
+      // A retry refers to the saved snapshot, even if its rows have since disappeared.
+      const reviewedRows = normalizeReviewedRows(input.reviewedRows, saved.rows);
+      if (JSON.stringify(saved.reviewedRows ?? []) !== JSON.stringify(reviewedRows)) throw new Error('Card comparison request ID reused');
       return { saved, duplicate: true };
     }
     if (comparison.stateHash !== expectedHash) throw new Error('Card schedule changed; reload before saving comparison');
-    const saved = { ...comparison, id: requestId, actor: sub, savedAt: new Date().toISOString() };
+    const reviewedRows = normalizeReviewedRows(input.reviewedRows, comparison.rows);
+    const reviewed = new Set(reviewedRows);
+    const reviewedTotal = comparison.rows.filter(row => reviewed.has(cardStatementRowKey(row))).reduce((sum, row) => sum + row.amount, 0);
+    const saved = { ...comparison, reviewedRows, reviewedTotal, unreviewedCount: comparison.rows.length - reviewedRows.length,
+      id: requestId, actor: sub, savedAt: new Date().toISOString() };
     book.db.prepare('INSERT INTO card_statement_comparisons (id, card_id, month, data) VALUES (?, ?, ?, ?)')
       .run(requestId, cardId, month, JSON.stringify(saved));
     return { saved, duplicate: false };
