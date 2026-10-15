@@ -94,6 +94,35 @@ export function cardStatementHistory(book, sub, cardId, month) {
     .all(cardId, month).map(row => { const saved = JSON.parse(row.data); return { ...saved, changed: saved.stateHash !== current.stateHash }; });
 }
 
+export const cardStatementHistoryOptions = {
+  difference: [['all', '금액 차이 전체'], ['mismatch', '금액 차이 있음'], ['match', '금액 일치']],
+  review: [['all', '회차 확인 전체'], ['unreviewed', '미확인 회차 있음'], ['reviewed', '미확인 회차 없음']],
+  state: [['all', '내역 상태 전체'], ['changed', '저장 후 변경됨'], ['unchanged', '저장 당시 유지']]
+};
+
+export function cardStatementHistoryPage(book, sub, cardId, month, options = {}) {
+  const current = cardMonthlySchedule(book, sub, cardId, month);
+  const filters = Object.fromEntries(Object.entries(cardStatementHistoryOptions).map(([key, values]) => {
+    const value = options[key] ?? 'all';
+    if (!values.some(([allowed]) => allowed === value)) throw new Error('Invalid card comparison history filter');
+    return [key, value];
+  }));
+  const requestedPage = String(options.page ?? '1');
+  if (!/^[1-9][0-9]{0,6}$/.test(requestedPage)) throw new Error('Invalid card comparison history page');
+  const clauses = ['card_id = ?', 'month = ?']; const params = [cardId, month];
+  if (filters.difference !== 'all') clauses.push(`json_extract(data, '$.difference') ${filters.difference === 'match' ? '=' : '<>'} 0`);
+  if (filters.review !== 'all') clauses.push(`COALESCE(json_extract(data, '$.unreviewedCount'), json_array_length(data, '$.rows')) ${filters.review === 'reviewed' ? '=' : '>'} 0`);
+  if (filters.state !== 'all') {
+    clauses.push(`json_extract(data, '$.stateHash') ${filters.state === 'unchanged' ? '=' : '<>'} ?`); params.push(current.stateHash);
+  }
+  const where = clauses.join(' AND ');
+  const total = book.db.prepare(`SELECT COUNT(*) AS total FROM card_statement_comparisons WHERE ${where}`).get(...params).total;
+  const pages = Math.max(1, Math.ceil(total / 20)); const page = Math.min(Number(requestedPage), pages);
+  const rows = book.db.prepare(`SELECT data FROM card_statement_comparisons WHERE ${where} ORDER BY rowid DESC LIMIT 20 OFFSET ?`)
+    .all(...params, (page - 1) * 20).map(row => { const saved = JSON.parse(row.data); return { ...saved, changed: saved.stateHash !== current.stateHash }; });
+  return { card: current.card, month, filters, total, page, pages, rows };
+}
+
 export function cardStatementComparisonCsv(book, sub, comparisonId) {
   if (typeof comparisonId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(comparisonId)) throw new Error('Invalid card comparison ID');
   const record = book.db.prepare('SELECT data FROM card_statement_comparisons WHERE id = ?').get(comparisonId);

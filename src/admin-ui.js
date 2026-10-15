@@ -12,7 +12,7 @@ import { editableManual, recordSplitManual, updateSplitManual } from './split-ma
 import { cardRefundReceiptPreview, recordCardRefundReceipt, cardRefundReceiptCandidates, linkCardRefundReceipt } from './card-refund-receipt.js';
 import { refundDistributionModes } from './card-refund-allocation.js';
 import { cardReductionPreview } from './card-reduction-preview.js';
-import { compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey, cardStatementComparisonCsv } from './card-statement.js';
+import { compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey, cardStatementComparisonCsv, cardStatementHistoryPage, cardStatementHistoryOptions } from './card-statement.js';
 import { refundPaidCardPurchase } from './card-refund.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase, visibleCardPurchases } from './card-cancellation.js';
 import { cardBillingRule, setCardBillingRule, firstCardDueDate } from './card-billing.js';
@@ -836,6 +836,30 @@ function renderCardStatementRows(rows, { selectable = false, reviewedRows = null
     ${selectable ? `<td><label><input type="checkbox" name="reviewedRow" value="${escape(cardStatementRowKey(row))}" aria-label="${escape(row.memo || row.planId)} ${row.index}회차 청구서 확인" style="width:auto">청구서 확인</label></td>` : reviewedRows ? `<td>${reviewed.has(cardStatementRowKey(row)) ? '확인' : '미확인'}</td>` : ''}</tr>`).join('');
 }
 
+function renderCardStatementHistoryItems(history) {
+  const money = value => value.toLocaleString('ko-KR');
+  return history.map(saved => `<details><summary>${escape(saved.savedAt)} (UTC) · 차이 ${money(saved.difference)}원 · 회차 확인 ${(saved.reviewedRows ?? []).length}/${saved.rows.length}건 · ${saved.changed ? '저장 후 내역 변경됨' : '저장 당시 내역 유지'}</summary>
+    <p>작업자: ${escape(saved.actor)} · 저장 당시 카드: ${escape(saved.card.name)} · 회차 예정액 ${money(saved.scheduledTotal)}원 · 비교 조정 ${money(saved.adjustmentAmount)}원 (${escape(saved.adjustmentReason || '없음')}) · 실제 청구 ${money(saved.statementAmount)}원</p>
+    <p>당시 확인한 회차 금액 ${money(saved.reviewedTotal ?? 0)}원 · 미확인 ${saved.unreviewedCount ?? saved.rows.length}건. 비교 조정액은 회차 확인 금액에 포함하지 않습니다.</p>
+    <p><a href="/admin/cards/statement.csv?comparisonId=${encodeURIComponent(saved.id)}">이 비교 내역 CSV 다운로드</a></p>
+    <table><tr><th>당시 예정일</th><th>구매</th><th>회차</th><th>당시 금액</th><th>당시 납부 기록</th><th>당시 청구서 대조</th></tr>${renderCardStatementRows(saved.rows, { reviewedRows: saved.reviewedRows ?? [] })}</table></details>`).join('') || '<p>저장한 비교가 없습니다.</p>';
+}
+
+function renderCardStatementHistory(book, session, cardId, month, options) {
+  const result = cardStatementHistoryPage(book, session.sub, cardId, month, options);
+  const cards = [...book.accounts().values()].filter(a => a.card && a.type === 'liability' && canAccessAccount(book, session.sub, a.id));
+  const query = { cardId, month, ...result.filters };
+  const link = (pageNumber, label) => `<a href="/admin/cards/statement-history?${escape(new URLSearchParams({ ...query, page: String(pageNumber) }).toString())}">${label}</a>`;
+  return page('카드 청구 비교 이력 조회', `<p>저장 당시 비교 금액과 회차 확인 상태를 조회합니다. 변경 여부는 현재 예정 내역과 비교하며 납부·취소·환불 후 달라질 수 있습니다. 미확인 회차 없음에는 회차가 없는 월도 포함되며 청구서 전체 검증 완료를 뜻하지 않습니다.</p>
+    <form method="get" action="/admin/cards/statement-history"><label>카드</label><select name="cardId">${cards.map(card => `<option value="${escape(card.id)}"${card.id === cardId ? ' selected' : ''}>${escape(card.name)}</option>`).join('')}</select>
+    <label>결제 예정 월</label><input type="month" name="month" max="9999-12" value="${escape(month)}" required>
+    ${Object.entries(cardStatementHistoryOptions).map(([key, values]) => `<label>${escape(values[0][1])}</label><select name="${key}">${values.map(([value, label]) => `<option value="${value}"${result.filters[key] === value ? ' selected' : ''}>${escape(label)}</option>`).join('')}</select>`).join('')}
+    <button>이력 조회</button></form><p>조건에 맞는 이력 ${result.total}건 · ${result.page}/${result.pages}페이지 · 페이지당 최대 20건 · 최근 등록순</p>
+    ${renderCardStatementHistoryItems(result.rows)}
+    <p>${result.page > 1 ? link(result.page - 1, '이전 페이지') : ''} ${result.page < result.pages ? link(result.page + 1, '다음 페이지') : ''}</p>
+    <p><a href="/admin/cards/statement?${escape(new URLSearchParams({ cardId, month }).toString())}">이 카드·월의 청구 비교로 돌아가기</a></p>`);
+}
+
 function renderCardStatement(book, session, input = {}, message = '') {
   const cards = [...book.accounts().values()].filter(a => a.card && a.type === 'liability' && canAccessAccount(book, session.sub, a.id));
   if (!cards.length) return page('카드 월별 청구 대사', '<p>조회 가능한 카드가 없습니다.</p>');
@@ -861,11 +885,7 @@ function renderCardStatement(book, session, input = {}, message = '') {
     <p>청구서의 구매·회차·금액을 직접 대조한 항목만 체크해 저장하세요. 일부만 확인한 상태도 저장할 수 있습니다. 확인 표시는 해당 비교 이력에만 남으며 납부 처리나 이후 비교에 자동 반영되지 않습니다.</p>
     ${writable ? `<form method="post" action="/admin/cards/statement">${hidden}<input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="expectedHash" value="${escape(comparison.stateHash)}"><input type="hidden" name="requestId" value="${randomUUID()}">${rowsTable}<button>현재 비교·회차 확인 내역 저장</button></form>` : `${rowsTable}<p>비교 저장에는 카드 쓰기 권한이 필요합니다.</p>`}
-    <h2>이 카드·월의 비교 이력 (최근 20건)</h2>${history.map(saved => `<details><summary>${escape(saved.savedAt)} (UTC) · 차이 ${money(saved.difference)}원 · 회차 확인 ${(saved.reviewedRows ?? []).length}/${saved.rows.length}건 · ${saved.changed ? '저장 후 내역 변경됨' : '저장 당시 내역 유지'}</summary>
-      <p>작업자: ${escape(saved.actor)} · 저장 당시 카드: ${escape(saved.card.name)} · 회차 예정액 ${money(saved.scheduledTotal)}원 · 비교 조정 ${money(saved.adjustmentAmount)}원 (${escape(saved.adjustmentReason || '없음')}) · 실제 청구 ${money(saved.statementAmount)}원</p>
-      <p>당시 확인한 회차 금액 ${money(saved.reviewedTotal ?? 0)}원 · 미확인 ${saved.unreviewedCount ?? saved.rows.length}건. 비교 조정액은 회차 확인 금액에 포함하지 않습니다.</p>
-      <p><a href="/admin/cards/statement.csv?comparisonId=${encodeURIComponent(saved.id)}">이 비교 내역 CSV 다운로드</a></p>
-      <table><tr><th>당시 예정일</th><th>구매</th><th>회차</th><th>당시 금액</th><th>당시 납부 기록</th><th>당시 청구서 대조</th></tr>${renderCardStatementRows(saved.rows, { reviewedRows: saved.reviewedRows ?? [] })}</table></details>`).join('') || '<p>저장한 비교가 없습니다.</p>'}
+    <h2>이 카드·월의 비교 이력 (최근 20건)</h2><p><a href="/admin/cards/statement-history?${escape(new URLSearchParams({ cardId: fields.cardId, month: fields.month }).toString())}">전체 이력 조회·조건 검색</a></p>${renderCardStatementHistoryItems(history)}
     <p><a href="/admin/cards">카드 예정액으로 돌아가기</a></p>`);
 }
 
@@ -1284,6 +1304,11 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         message = rule ? `<p class="notice">첫 결제 예정일: ${escape(firstCardDueDate(preview.date, rule))} (주말: ${escape(({ none: '조정 없음', next: '다음 평일', previous: '이전 평일' })[rule.weekendAdjustment ?? 'none'])}, 공휴일 조정 없음)</p>` : '<p class="error">청구 규칙을 설정하거나 첫 결제 예정일을 직접 입력하세요.</p>';
       }
       sendHtml(res, 200, renderCards(book, session, throughDate, message, preview)); return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/cards/statement-history') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const options = Object.fromEntries(['difference', 'review', 'state', 'page'].filter(key => query.has(key)).map(key => [key, query.get(key)]));
+      sendHtml(res, 200, renderCardStatementHistory(book, session, query.get('cardId'), query.get('month'), options)); return true;
     }
     if (req.method === 'GET' && pathname === '/admin/cards/statement.csv') {
       const comparisonId = new URL(req.url, 'http://localhost').searchParams.get('comparisonId');

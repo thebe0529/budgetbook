@@ -9,7 +9,7 @@ import { ensureOwner, setMember } from '../src/members.js';
 import { recordCardPurchase, recordCardPayment } from '../src/card-manual.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase } from '../src/card-cancellation.js';
 import { refundPaidCardPurchase } from '../src/card-refund.js';
-import { cardMonthlySchedule, compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey, cardStatementComparisonCsv } from '../src/card-statement.js';
+import { cardMonthlySchedule, compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey, cardStatementComparisonCsv, cardStatementHistoryPage } from '../src/card-statement.js';
 import { createImportApi } from '../src/import-api.js';
 
 function fixture(filename) {
@@ -275,4 +275,90 @@ test('CSV exports older snapshots beyond the visible history limit, legacy unche
     assert.ok(csv.includes('"전체 회차 수",0')); assert.ok(csv.includes('"미확인 회차 수",0'));
     assert.doesNotMatch(csv, /\r\n"회차",/);
   } finally { book.close(); }
+});
+
+test('card comparison history combines filters before paging and orders identical timestamps by registration', () => {
+  const { book, plan } = fixture();
+  try {
+    const records = []; const key = cardStatementRowKey(preview(book).rows[0]);
+    for (let index = 0; index < 45; index++) {
+      if (index === 21) pay(book, plan);
+      const saved = saveCardStatementComparison(book, 'editor', request(book, { statementExpression: String(4000 + index % 3 - 1),
+        reviewedRows: index % 2 ? [key] : [] })).saved;
+      records.push({ ...saved, changed: index < 21 });
+      // Equal times must not cause missing or repeated records across pages.
+      saved.savedAt = '2026-11-25T00:00:00.000Z';
+      book.db.prepare('UPDATE card_statement_comparisons SET data = ? WHERE id = ?').run(JSON.stringify(saved), saved.id);
+    }
+    for (const difference of ['all', 'mismatch', 'match']) for (const review of ['all', 'unreviewed', 'reviewed']) for (const state of ['all', 'changed', 'unchanged']) {
+      const expected = [...records].reverse().filter(row => (difference === 'all' || (difference === 'match' ? row.difference === 0 : row.difference !== 0)) &&
+        (review === 'all' || (review === 'reviewed' ? row.unreviewedCount === 0 : row.unreviewedCount > 0)) &&
+        (state === 'all' || (state === 'changed' ? row.changed : !row.changed)));
+      const first = cardStatementHistoryPage(book, 'viewer', 'card', '2026-11', { difference, review, state });
+      assert.equal(first.total, expected.length); assert.deepEqual(first.rows.map(row => row.id), expected.slice(0, 20).map(row => row.id));
+      assert.ok(first.rows.every(row => row.changed === records.find(item => item.id === row.id).changed));
+      const last = cardStatementHistoryPage(book, 'viewer', 'card', '2026-11', { difference, review, state, page: '9999999' });
+      assert.equal(last.page, Math.max(1, Math.ceil(expected.length / 20)));
+      assert.deepEqual(last.rows.map(row => row.id), expected.slice((last.page - 1) * 20).map(row => row.id));
+    }
+    const page2 = cardStatementHistoryPage(book, 'viewer', 'card', '2026-11', { page: 2 });
+    assert.deepEqual(page2.rows.map(row => row.id), [...records].reverse().slice(20, 40).map(row => row.id));
+  } finally { book.close(); }
+});
+
+test('history page validates filters and access, handles legacy and zero-row snapshots and performs no writes', () => {
+  const { book } = fixture();
+  try {
+    const saved = saveCardStatementComparison(book, 'editor', request(book)).saved;
+    delete saved.reviewedRows; delete saved.reviewedTotal; delete saved.unreviewedCount;
+    book.db.prepare('UPDATE card_statement_comparisons SET data = ? WHERE id = ?').run(JSON.stringify(saved), saved.id);
+    const empty = saveCardStatementComparison(book, 'editor', request(book, { month: '2027-02', statementExpression: '0', expectedHash: preview(book, { month: '2027-02' }).stateHash })).saved;
+    const changes = book.db.prepare('SELECT total_changes() AS n').get().n;
+    assert.equal(cardStatementHistoryPage(book, 'viewer', 'card', '2026-11', { review: 'unreviewed' }).total, 1);
+    assert.equal(cardStatementHistoryPage(book, 'viewer', 'card', '2026-11', { review: 'reviewed' }).total, 0);
+    assert.equal(cardStatementHistoryPage(book, 'viewer', 'card', '2027-02', { review: 'reviewed' }).rows[0].id, empty.id);
+    const none = cardStatementHistoryPage(book, 'viewer', 'card', '2027-03');
+    assert.equal(none.total, 0); assert.equal(none.page, 1); assert.equal(none.pages, 1); assert.deepEqual(none.rows, []);
+    for (const options of [{ difference: "' OR 1=1" }, { review: 'unknown' }, { state: '<script>' }, ...['0', '-1', '1.5', '1e2', '01', '10000000', ''].map(page => ({ page }))]) {
+      assert.throws(() => cardStatementHistoryPage(book, 'viewer', 'card', '2026-11', options), /Invalid/);
+    }
+    assert.throws(() => cardStatementHistoryPage(book, 'viewer', 'private', '2026-11'), /read access/);
+    assert.throws(() => cardStatementHistoryPage(book, 'viewer', 'card', '2026-13'));
+    assert.equal(book.db.prepare('SELECT total_changes() AS n').get().n, changes);
+    setMember(book, 'owner', 'viewer', 'viewer', []);
+    assert.throws(() => cardStatementHistoryPage(book, 'viewer', 'card', '2026-11'), /read access/);
+  } finally { book.close(); }
+});
+
+test('HTTP history filters retain navigation and CSV links, escape snapshots and enforce read access', async () => {
+  const { book, plan } = fixture();
+  for (let index = 0; index < 25; index++) saveCardStatementComparison(book, 'editor', request(book, { statementExpression: '4001', adjustmentReason: '<검색 & 사유>' }));
+  pay(book, plan);
+  const server = createImportApi(book, { auth: { session: () => ({ sub: 'viewer', role: 'viewer', csrf: 'token' }) } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}/admin/cards`;
+  try {
+    const query = { cardId: 'card', month: '2026-11', difference: 'mismatch', review: 'unreviewed', state: 'changed' };
+    const changes = book.db.prepare('SELECT total_changes() AS n').get().n;
+    const response = await fetch(`${base}/statement-history?${new URLSearchParams(query)}`); assert.equal(response.status, 200);
+    const html = await response.text(); assert.match(html, /25건 · 1\/2페이지/); assert.match(html, /&lt;검색 &amp; 사유&gt;/);
+    assert.match(html, /&lt;공유 &amp; 카드&gt;/); assert.doesNotMatch(html, /비공개 카드|비공개 구매|비공개 출금 은행|method="post"/);
+    const next = html.match(/href="([^\"]+)"[^>]*>다음 페이지/)[1].replaceAll('&amp;', '&');
+    const nextUrl = new URL(next, base);
+    for (const [key, value] of Object.entries(query)) assert.equal(nextUrl.searchParams.get(key), value);
+    assert.equal(nextUrl.searchParams.get('page'), '2');
+    const older = await (await fetch(nextUrl)).text(); assert.match(older, /25건 · 2\/2페이지/); assert.match(older, /이전 페이지/); assert.doesNotMatch(older, />다음 페이지/);
+    assert.equal((older.match(/<details>/g) ?? []).length, 5);
+    const csvPath = older.match(/href="([^\"]*\/statement.csv\?[^\"]*)"/)[1];
+    assert.equal((await fetch(new URL(csvPath, base))).status, 200);
+    const comparison = await (await fetch(`${base}/statement?cardId=card&month=2026-11`)).text(); assert.match(comparison, /전체 이력 조회·조건 검색/);
+    for (const bad of [{ ...query, cardId: 'private' }, { ...query, month: 'bad' }, { ...query, page: '-1' }, { ...query, difference: 'bad' }, {}]) {
+      assert.equal((await fetch(`${base}/statement-history?${new URLSearchParams(bad)}`)).status, 400);
+    }
+    const noResults = await (await fetch(`${base}/statement-history?${new URLSearchParams({ ...query, difference: 'match' })}`)).text();
+    assert.match(noResults, /0건 · 1\/1페이지/); assert.doesNotMatch(noResults, /<details>/);
+    assert.equal(book.db.prepare('SELECT total_changes() AS n').get().n, changes);
+    setMember(book, 'owner', 'viewer', 'viewer', []);
+    assert.equal((await fetch(nextUrl)).status, 400); assert.equal((await fetch(new URL(csvPath, base))).status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); book.close(); }
 });
