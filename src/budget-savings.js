@@ -43,7 +43,7 @@ export function fillBudgetSavings(book, sub, month, requestId, expectedHash) {
     const old = book.db.prepare('SELECT data FROM budget_savings_fills WHERE id = ?').get(requestId);
     if (old) {
       const saved = JSON.parse(old.data);
-      if (saved.month !== month || saved.actor !== sub || saved.expectedHash !== expectedHash) throw new Error('Request ID reused with different savings fill');
+      if (saved.mode === 'limited' || saved.month !== month || saved.actor !== sub || saved.expectedHash !== expectedHash) throw new Error('Request ID reused with different savings fill');
       return { ...saved, duplicate: true };
     }
     const preview = budgetSavingsPreview(book, sub, month);

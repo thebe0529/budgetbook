@@ -27,6 +27,7 @@ import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } fr
 import { budgetMonthMovePreview, moveBudgetMonth, budgetMonthMoves } from './budget-month-moves.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { budgetSavingsPreview, fillBudgetSavings, setBudgetSavingsTarget, budgetSavingsFills } from './budget-savings.js';
+import { budgetSavingsPriorities, setBudgetSavingsPriority, budgetSavingsPartialPreview, fillBudgetSavingsPartial } from './budget-savings-partial.js';
 import { budgetOverspending, budgetCategoryActivity, budgetCategoryActivityCsv, budgetActivityFilters, budgetActivitySortOptions } from './budget-alerts.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
 import { registerFilters, registerPage, registerSortOptions } from './register-view.js';
@@ -642,6 +643,18 @@ function renderBudgetMonthMovePreview(book, session, input) {
     <button>이 내용으로 월간 배정 이동 저장</button></form><p><a href="/admin/budget?month=${encodeURIComponent(preview.payload.fromMonth)}">예산으로 돌아가기</a></p>`);
 }
 
+function renderBudgetSavingsPartialPreview(book, session, input) {
+  const preview = budgetSavingsPartialPreview(book, session.sub, input.month, input.amountExpression);
+  const money = value => value.toLocaleString('ko-KR');
+  const fields = { month: input.month, amountExpression: String(preview.limit), expectedHash: preview.expectedHash, requestId: input.requestId, csrf: session.csrf };
+  return page('저축 목표 한도 내 배정 미리보기', `<p>아직 저장하지 않았습니다. 우선순위 숫자가 작은 항목부터 부족액을 채우며 같은 순위는 카테고리 ID 순서입니다.</p>
+    <p>배정 한도 ${money(preview.limit)}원 · 실제 추가 배정 ${money(preview.total)}원 · 사용하지 않은 한도 ${money(preview.unusedLimit)}원 · 남은 목표 부족액 ${money(preview.remainingNeeded)}원</p>
+    <p>미배정 자금 ${money(preview.readyToAssign)} → ${money(preview.afterReadyToAssign)}원</p>
+    <table><tr><th>항목·우선순위</th><th>목표 부족액</th><th>추가 배정</th><th>남은 부족액</th><th>월 배정 전 → 후</th><th>잔액 전 → 후</th></tr>${preview.rows.map(row => `<tr><td>${escape(row.name)} · ${row.priority}</td><td>${money(row.needed)}원</td><td>${money(row.assigned)}원</td><td>${money(row.remainingNeeded)}원</td><td>${money(row.budgeted)} → ${money(row.afterBudgeted)}원</td><td>${money(row.balance)} → ${money(row.afterBalance)}원</td></tr>`).join('')}</table>
+    <form method="post" action="/admin/budget/fill-savings-limited">${Object.entries(fields).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('')}<button ${preview.total > 0 ? '' : 'disabled'}>이 내용으로 한도 내 배정 저장</button></form>
+    <p><a href="/admin/budget?month=${encodeURIComponent(input.month)}">예산으로 돌아가기</a></p>`);
+}
+
 function renderBudget(book, session, month, message = '') {
   assertMonth(month);
   if (session.role !== 'owner') throw new Error('Owner access required');
@@ -652,17 +665,20 @@ function renderBudget(book, session, month, message = '') {
   const targets = new Map(targetPreview.rows.map(row => [row.categoryId, row]));
   const savings = budgetSavingsPreview(book, session.sub, month);
   const savingsTargets = new Map(savings.rows.map(row => [row.categoryId, row]));
+  const savingsPriorities = budgetSavingsPriorities(book, session.sub);
   const categories = book.budgetCategories();
   const savingsRows = [...categories.values()].map(category => {
     const goal = savingsTargets.get(category.id);
     return `<tr><td>${escape(category.name)}</td><td>${budget.categories[category.id].balance.toLocaleString('ko-KR')}원</td><td><form method="post" action="/admin/budget/savings-target">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="categoryId" value="${escape(category.id)}">
       <input name="amountExpression" aria-label="${escape(category.name)} 저축 잔액 목표" value="${goal?.target ?? 0}" maxlength="256" required><button>잔액 목표 저장</button></form></td>
-      <td>${(goal?.needed ?? 0).toLocaleString('ko-KR')}원</td><td>${(goal?.afterBudgeted ?? budget.categories[category.id].budgeted).toLocaleString('ko-KR')}원</td></tr>`;
+      <td>${(goal?.needed ?? 0).toLocaleString('ko-KR')}원</td><td>${(goal?.afterBudgeted ?? budget.categories[category.id].budgeted).toLocaleString('ko-KR')}원</td>
+      <td>${goal ? `<form method="post" action="/admin/budget/savings-priority"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="categoryId" value="${escape(category.id)}"><input type="number" name="priority" min="1" max="100" aria-label="${escape(category.name)} 저축 배정 우선순위" value="${savingsPriorities.get(category.id) ?? 50}" required><button>순위 저장</button></form>` : '목표 설정 후 저장'}</td></tr>`;
   }).join('');
-  const savingsHistory = budgetSavingsFills(book, session.sub, month).map(fill => `<details><summary>${escape(fill.createdAt)} (UTC) · ${fill.count}항목 · ${fill.total.toLocaleString('ko-KR')}원</summary>
+  const savingsHistory = budgetSavingsFills(book, session.sub, month).map(fill => `<details><summary>${escape(fill.createdAt)} (UTC) · ${fill.mode === 'limited' ? '한도 내 배정' : '전체 부족액 배정'} · ${fill.count}항목 · ${fill.total.toLocaleString('ko-KR')}원</summary>
     <p>작업자: ${escape(fill.actor)} · 요청 ID: ${escape(fill.id)} · 미배정 자금 ${fill.readyToAssign.toLocaleString('ko-KR')} → ${fill.afterReadyToAssign.toLocaleString('ko-KR')}원. 아래는 배정 당시 내역입니다.</p>
-    <table><tr><th>당시 항목·잔액 목표</th><th>잔액 전 → 후</th><th>추가 배정</th><th>월 배정 전 → 후</th></tr>${fill.rows.map(row => `<tr><td>${escape(row.name)} · ${row.target.toLocaleString('ko-KR')}원</td><td>${row.balance.toLocaleString('ko-KR')} → ${row.afterBalance.toLocaleString('ko-KR')}원</td><td>${row.needed.toLocaleString('ko-KR')}원</td><td>${row.budgeted.toLocaleString('ko-KR')} → ${row.afterBudgeted.toLocaleString('ko-KR')}원</td></tr>`).join('')}</table></details>`).join('');
+    ${fill.mode === 'limited' ? `<p>당시 한도 ${fill.limit.toLocaleString('ko-KR')}원 · 남은 목표 부족액 ${fill.remainingNeeded.toLocaleString('ko-KR')}원 · 사용하지 않은 한도 ${fill.unusedLimit.toLocaleString('ko-KR')}원</p>` : ''}
+    <table><tr><th>당시 항목·잔액 목표</th><th>잔액 전 → 후</th><th>추가 배정</th><th>월 배정 전 → 후</th></tr>${fill.rows.map(row => `<tr><td>${escape(row.name)} · ${row.target.toLocaleString('ko-KR')}원${fill.mode === 'limited' ? ` · 순위 ${row.priority}` : ''}</td><td>${row.balance.toLocaleString('ko-KR')} → ${row.afterBalance.toLocaleString('ko-KR')}원</td><td>${(row.assigned ?? row.needed).toLocaleString('ko-KR')}원</td><td>${row.budgeted.toLocaleString('ko-KR')} → ${row.afterBudgeted.toLocaleString('ko-KR')}원</td></tr>`).join('')}</table></details>`).join('');
   const options = [...categories.values()].map(c => `<option value="${escape(c.id)}">${escape(c.name)}</option>`).join('');
   const moves = budgetMoves(book, session.sub, month).map(move => `<tr><td>${escape(move.createdAt)}</td>
     <td>${escape(categories.get(move.payload.fromCategoryId)?.name ?? move.payload.fromCategoryId)}</td>
@@ -709,11 +725,13 @@ function renderBudget(book, session, month, message = '') {
       <button ${targetPreview.total > 0 ? '' : 'disabled'}>이번 달 목표 부족액 채우기</button></form>
     <h2>저축 잔액 목표</h2><p>조회 월의 이월 포함 잔액이 목표에 도달하도록 부족액을 이번 달 배정액에 더합니다. 음수 이월은 먼저 보충하고 이미 목표 이상이면 줄이지 않습니다. 0원으로 저장하면 목표를 해제합니다. 목표는 다른 월에도 적용되며 자동 배정이나 실제 은행 이체는 하지 않습니다.</p>
     <p>매월 배정 목표와 별도로 계산합니다. 한쪽에서 배정하면 다시 조회해 부족액을 확인하세요.</p>
-    <table><tr><th>카테고리</th><th>현재 이월 포함 잔액</th><th>잔액 목표</th><th>추가 배정 필요</th><th>채운 후 월 배정액</th></tr>${savingsRows}</table>
+    <table><tr><th>카테고리</th><th>현재 이월 포함 잔액</th><th>잔액 목표</th><th>추가 배정 필요</th><th>채운 후 월 배정액</th><th>한도 배정 우선순위</th></tr>${savingsRows}</table>
     <form method="post" action="/admin/budget/fill-savings"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="requestId" value="${randomUUID()}"><input type="hidden" name="expectedHash" value="${escape(savings.expectedHash)}">
     <p>잔액 목표 부족액 합계 ${savings.total.toLocaleString('ko-KR')}원 · 채운 후 미배정 자금 ${savings.afterReadyToAssign.toLocaleString('ko-KR')}원</p>
     ${savings.total > 0 && savings.afterReadyToAssign < 0 ? '<p class="error">잔액 목표를 모두 채우면 미배정 자금이 음수가 됩니다. 배정액과 가용 자금을 확인하세요.</p>' : ''}
     <button ${savings.total > 0 ? '' : 'disabled'}>저축 잔액 목표 부족액 채우기</button></form>
+    <h3>가용 자금 안에서 일부 배정</h3><p>배정 한도는 현재 미배정 자금 이하로 입력합니다. 순위는 1~100 중 작은 숫자가 먼저이며 기본값은 50입니다. 같은 순위는 카테고리 ID 순서로 처리합니다. 목표가 이미 채워진 항목은 건너뜁니다.</p>
+    <form method="post" action="/admin/budget/fill-savings-limited/preview"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="month" value="${escape(month)}"><input type="hidden" name="requestId" value="${randomUUID()}"><label>배정 한도 (사칙연산 가능)</label><input name="amountExpression" maxlength="256" value="${Math.max(0, budget.readyToAssign)}" required><button>한도 내 배정 미리보기</button></form>
     <h3>이번 달 잔액 목표 배정 이력 (최근 20건)</h3>${savingsHistory || '<p>잔액 목표 배정 이력이 없습니다.</p>'}
     <h2 id="budget-move">카테고리 간 예산 이동</h2><p>이번 달 배정액 안에서 이동합니다. 총 배정액은 유지하며, 지출과 이월액은 이동하지 않습니다.</p>
     <form method="post" action="/admin/budget/move">
@@ -1773,6 +1791,21 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         amountExpression: form.get('amountExpression') });
       sendHtml(res, 200, renderBudget(book, session, month,
         `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 예산 이동: ${result.payload.amount.toLocaleString('ko-KR')}원</p>`));
+      return true;
+    }
+    if (req.method === 'POST' && ['/admin/budget/savings-priority', '/admin/budget/fill-savings-limited/preview', '/admin/budget/fill-savings-limited'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const month = form.get('month'); assertMonth(month);
+      if (pathname.endsWith('/savings-priority')) {
+        setBudgetSavingsPriority(book, session.sub, form.get('categoryId'), form.get('priority'));
+        sendHtml(res, 200, renderBudget(book, session, month, '<p class="notice">저축 배정 우선순위를 저장했습니다.</p>'));
+      } else if (pathname.endsWith('/preview')) {
+        sendHtml(res, 200, renderBudgetSavingsPartialPreview(book, session, { month, amountExpression: form.get('amountExpression'), requestId: form.get('requestId') }));
+      } else {
+        const result = fillBudgetSavingsPartial(book, session.sub, month, form.get('amountExpression'), form.get('requestId'), form.get('expectedHash'));
+        sendHtml(res, 200, renderBudget(book, session, month, `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 한도 내 저축 배정: ${result.total.toLocaleString('ko-KR')}원</p>`));
+      }
       return true;
     }
     if (req.method === 'POST' && ['/admin/budget/savings-target', '/admin/budget/fill-savings'].includes(pathname)) {
