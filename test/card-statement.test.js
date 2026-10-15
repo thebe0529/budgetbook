@@ -9,7 +9,7 @@ import { ensureOwner, setMember } from '../src/members.js';
 import { recordCardPurchase, recordCardPayment } from '../src/card-manual.js';
 import { cardCancellationPreview, cancelCardPurchase, partiallyCancelCardPurchase } from '../src/card-cancellation.js';
 import { refundPaidCardPurchase } from '../src/card-refund.js';
-import { cardMonthlySchedule, compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey } from '../src/card-statement.js';
+import { cardMonthlySchedule, compareCardStatement, saveCardStatementComparison, cardStatementHistory, cardStatementRowKey, cardStatementComparisonCsv } from '../src/card-statement.js';
 import { createImportApi } from '../src/import-api.js';
 
 function fixture(filename) {
@@ -146,6 +146,17 @@ test('HTTP monthly comparison protects private cards, escapes live and saved det
     sub = 'editor'; const result = await post(data); assert.equal(result.status, 200);
     const savedHtml = await result.text(); assert.match(savedHtml, /&lt;조정 &amp; 확인&gt;/); assert.match(savedHtml, /회차 확인 1\/1건/);
     assert.match(savedHtml, /당시 확인한 회차 금액 4,000원 · 미확인 0건/); assert.doesNotMatch(savedHtml, / checked/);
+    const downloadPath = savedHtml.match(/href="([^\"]*\/statement.csv\?[^\"]*)"/)[1];
+    sub = 'viewer';
+    const csvResponse = await fetch(new URL(downloadPath, base)); assert.equal(csvResponse.status, 200);
+    assert.equal(csvResponse.headers.get('content-type'), 'text/csv; charset=utf-8');
+    assert.equal(csvResponse.headers.get('content-disposition'), `attachment; filename="budgetbook-card-statement-${data.requestId}.csv"`);
+    assert.equal(csvResponse.headers.get('cache-control'), 'no-store'); assert.equal(csvResponse.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal((await csvResponse.text()).replace(/^\uFEFF/, ''), cardStatementComparisonCsv(book, 'viewer', data.requestId).replace(/^\uFEFF/, ''));
+    for (const comparisonId of ['', 'bad\r\nheader', randomUUID()]) assert.equal((await fetch(`${base}/statement.csv?${new URLSearchParams({ comparisonId })}`)).status, 400);
+    setMember(book, 'owner', 'viewer', 'viewer', []);
+    assert.equal((await fetch(new URL(downloadPath, base))).status, 400);
+    sub = 'editor';
     assert.equal((await post({ ...data, reviewedRow: '' })).status, 400);
     assert.equal((await post(data)).status, 200); assert.equal(book.entries().length, 2);
     pay(book, plan); assert.equal((await post({ ...data, requestId: randomUUID() })).status, 400);
@@ -203,5 +214,65 @@ test('legacy comparisons without row reviews retain unchecked replay and cannot 
     const fresh = saveCardStatementComparison(book, 'editor', request(book)).saved;
     assert.deepEqual(fresh.reviewedRows, []); assert.equal(fresh.unreviewedCount, 1);
     assert.equal(cardStatementHistory(book, 'viewer', 'card', '2026-11')[1].reviewedRows, undefined);
+  } finally { book.close(); }
+});
+
+test('card comparison CSV preserves saved rows after payment and protects spreadsheet text without ledger writes', () => {
+  const { book, plan, purchase } = fixture();
+  try {
+    const extra = recordCardPurchase(book, 'editor', { ...purchase, requestId: randomUUID(), memo: '=SUM(1,2)\n"구매"' }).plan;
+    const input = request(book, { statementExpression: '7500', adjustmentExpression: '-500', adjustmentReason: '@SUM(1,2)\r\n"사유"',
+      reviewedRows: [cardStatementRowKey({ planId: extra.id, index: 1 })] });
+    saveCardStatementComparison(book, 'editor', input);
+    pay(book, plan, '2026-10-20');
+    const changes = book.db.prepare('SELECT total_changes() AS n').get().n; const before = book.entries();
+    const csv = cardStatementComparisonCsv(book, 'viewer', input.requestId);
+    assert.ok(csv.startsWith('\uFEFF')); assert.ok(csv.endsWith('\r\n'));
+    assert.ok(csv.includes('"다운로드 시 내역 상태","저장 후 내역 변경됨"'));
+    assert.ok(csv.includes('"비교 조정액(원)",-500')); assert.ok(csv.includes('"청구서 − 비교 기준 차이(원)",0'));
+    assert.ok(csv.includes('"확인한 회차 금액(원)",4000')); assert.ok(csv.includes('"미확인 회차 수",1'));
+    assert.ok(csv.includes('"\'=SUM(1,2)\n""구매"""')); assert.ok(csv.includes('"\'@SUM(1,2)\r\n""사유"""'));
+    assert.ok(csv.includes(`"${extra.id}","${extra.purchaseEntryId}",1,"2026-11-25",4000`));
+    assert.ok(csv.includes('"확인"')); assert.ok(csv.includes('"미확인"')); assert.ok(!csv.includes('2026-10-20'));
+    assert.doesNotMatch(csv, /비공개 출금 은행|비공개 카드|비공개 구매|stateHash|purchaseHash/);
+    assert.equal(book.db.prepare('SELECT total_changes() AS n').get().n, changes); assert.deepEqual(book.entries(), before);
+  } finally { book.close(); }
+});
+
+test('card comparison CSV requires current access to the saved card, not just a valid comparison ID', () => {
+  const { book } = fixture();
+  try {
+    const input = { cardId: 'private', month: '2026-11', statementExpression: '4000', requestId: randomUUID(),
+      expectedHash: compareCardStatement(book, 'owner', { cardId: 'private', month: '2026-11' }).stateHash };
+    saveCardStatementComparison(book, 'owner', input);
+    assert.match(cardStatementComparisonCsv(book, 'owner', input.requestId), /비공개 카드/);
+    assert.throws(() => cardStatementComparisonCsv(book, 'editor', input.requestId), /read access/);
+    assert.throws(() => cardStatementComparisonCsv(book, 'unknown', input.requestId), /read access/);
+    assert.throws(() => cardStatementComparisonCsv(book, 'owner', randomUUID()), /not found/);
+    assert.throws(() => cardStatementComparisonCsv(book, 'owner', null), /Invalid/);
+    setMember(book, 'owner', 'viewer', 'viewer', ['private']);
+    assert.match(cardStatementComparisonCsv(book, 'viewer', input.requestId), /비공개 카드/);
+    setMember(book, 'owner', 'viewer', 'viewer', []);
+    assert.throws(() => cardStatementComparisonCsv(book, 'viewer', input.requestId), /read access/);
+  } finally { book.close(); }
+});
+
+test('CSV exports older snapshots beyond the visible history limit, legacy unchecked rows and empty months', () => {
+  const { book } = fixture();
+  try {
+    const first = saveCardStatementComparison(book, 'editor', request(book)).saved;
+    delete first.reviewedRows; delete first.reviewedTotal; delete first.unreviewedCount;
+    book.db.prepare('UPDATE card_statement_comparisons SET data = ? WHERE id = ?').run(JSON.stringify(first), first.id);
+    for (let index = 0; index < 21; index++) saveCardStatementComparison(book, 'editor', request(book));
+    assert.equal(cardStatementHistory(book, 'viewer', 'card', '2026-11').length, 20);
+    assert.ok(!cardStatementHistory(book, 'viewer', 'card', '2026-11').some(item => item.id === first.id));
+    const old = cardStatementComparisonCsv(book, 'viewer', first.id);
+    assert.ok(old.includes(first.id)); assert.ok(old.includes('"확인 회차 수",0')); assert.ok(old.includes('"미확인 회차 수",1'));
+    assert.ok(old.includes('"미확인"'));
+    const empty = saveCardStatementComparison(book, 'editor', request(book, { month: '2027-02', statementExpression: '0',
+      expectedHash: preview(book, { month: '2027-02' }).stateHash })).saved;
+    const csv = cardStatementComparisonCsv(book, 'viewer', empty.id);
+    assert.ok(csv.includes('"전체 회차 수",0')); assert.ok(csv.includes('"미확인 회차 수",0'));
+    assert.doesNotMatch(csv, /\r\n"회차",/);
   } finally { book.close(); }
 });

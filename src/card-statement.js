@@ -2,6 +2,7 @@ import { assertMonth } from './ledger.js';
 import { canAccessAccount } from './members.js';
 import { calculateAmount } from './amount-expression.js';
 import { entryFingerprint } from './transaction-checks.js';
+import { serializeCsv } from './csv.js';
 
 export const cardStatementRowKey = row => JSON.stringify([row.planId, row.index]);
 
@@ -91,4 +92,30 @@ export function cardStatementHistory(book, sub, cardId, month) {
   const current = cardMonthlySchedule(book, sub, cardId, month);
   return book.db.prepare('SELECT data FROM card_statement_comparisons WHERE card_id = ? AND month = ? ORDER BY rowid DESC LIMIT 20')
     .all(cardId, month).map(row => { const saved = JSON.parse(row.data); return { ...saved, changed: saved.stateHash !== current.stateHash }; });
+}
+
+export function cardStatementComparisonCsv(book, sub, comparisonId) {
+  if (typeof comparisonId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(comparisonId)) throw new Error('Invalid card comparison ID');
+  const record = book.db.prepare('SELECT data FROM card_statement_comparisons WHERE id = ?').get(comparisonId);
+  if (!record) throw new Error('Card comparison not found');
+  const saved = JSON.parse(record.data);
+  const current = cardMonthlySchedule(book, sub, saved.card.id, saved.month);
+  const reviewed = new Set(saved.reviewedRows ?? []);
+  const summary = [
+    ['비교 ID', saved.id], ['결제 예정 월', saved.month], ['카드 ID', saved.card.id], ['저장 당시 카드명', saved.card.name],
+    ['작업자', saved.actor], ['저장 시각(UTC)', saved.savedAt],
+    ['다운로드 시 내역 상태', saved.stateHash === current.stateHash ? '저장 당시 내역 유지' : '저장 후 내역 변경됨'],
+    ['당시 회차 예정액(원)', saved.scheduledTotal], ['당시 납부 기록 금액(원)', saved.paidTotal], ['당시 미납 금액(원)', saved.pendingTotal],
+    ['비교 조정액(원)', saved.adjustmentAmount], ['조정 사유', saved.adjustmentReason], ['비교 기준액(원)', saved.expectedAmount],
+    ['실제 청구액(원)', saved.statementAmount], ['청구서 − 비교 기준 차이(원)', saved.difference],
+    ['전체 회차 수', saved.rows.length], ['확인 회차 수', reviewed.size], ['미확인 회차 수', saved.unreviewedCount ?? saved.rows.length],
+    ['확인한 회차 금액(원)', saved.reviewedTotal ?? 0],
+    ['안내', '회차 확인은 저장 당시 수동 대조 기록입니다. 비교 조정액은 회차 확인 금액에 포함하지 않으며 원장·예산·납부를 변경하지 않습니다.']
+  ];
+  return serializeCsv([
+    ['구분', '항목', '값', '구매 계획 ID', '원구매 분개 ID', '회차', '당시 예정일', '당시 금액(원)', '당시 메모', '당시 납부일', '당시 납부 분개 ID', '당시 청구서 대조'],
+    ...summary.map(([key, value]) => ['비교 요약', key, value, ...Array(9).fill('')]),
+    ...saved.rows.map(row => ['회차', '', '', row.planId, row.purchaseEntryId, row.index, row.dueDate, row.amount, row.memo,
+      row.paymentDate, row.paidEntryId, reviewed.has(cardStatementRowKey(row)) ? '확인' : '미확인'])
+  ]);
 }
