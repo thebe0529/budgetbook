@@ -24,6 +24,7 @@ import { accountActivityCsv, cashMovementsCsv } from './report-export.js';
 import { monthlyComparison, monthlyComparisonCsv, monthlyComparisonOptions, monthlyAccountTypes, monthlyComparisonFilters, monthlySortOptions } from './monthly-comparison.js';
 import { backupSettings, configureBackups, listBackups } from './backups.js';
 import { budgetMoves, copyPreviousBudget, moveBudget, previousBudgetPreview } from './budget-actions.js';
+import { budgetMonthMovePreview, moveBudgetMonth, budgetMonthMoves } from './budget-month-moves.js';
 import { budgetTargetPreview, fillBudgetTargets, setBudgetTarget } from './budget-targets.js';
 import { budgetOverspending, budgetCategoryActivity, budgetCategoryActivityCsv, budgetActivityFilters, budgetActivitySortOptions } from './budget-alerts.js';
 import { confirmTransactions, setTransactionChecked } from './transaction-checks.js';
@@ -620,6 +621,26 @@ function renderAdjustmentDetail(book, session, id) {
     <p><a href="/admin/adjustments">일괄 조정으로 돌아가기</a></p>`);
 }
 
+function renderBudgetMonthImpacts(impacts) {
+  const money = value => value.toLocaleString('ko-KR');
+  return `<table><tr><th>월·항목</th><th>월 배정 전 → 후</th><th>이월 포함 잔액 전 → 후</th><th>미배정 자금 전 → 후</th></tr>${impacts.flatMap(impact => impact.before.categories.map((before, index) => {
+    const after = impact.after.categories[index];
+    return `<tr><td>${escape(impact.month)} · ${escape(before.name)}</td><td>${money(before.budgeted)} → ${money(after.budgeted)}원</td><td>${money(before.balance)} → ${money(after.balance)}원</td><td>${money(impact.before.readyToAssign)} → ${money(impact.after.readyToAssign)}원</td></tr>`;
+  })).join('')}</table>`;
+}
+
+function renderBudgetMonthMovePreview(book, session, input) {
+  const preview = budgetMonthMovePreview(book, session.sub, input);
+  const fields = { fromMonth: preview.payload.fromMonth, toMonth: preview.payload.toMonth,
+    fromCategoryId: preview.payload.fromCategoryId, toCategoryId: preview.payload.toCategoryId,
+    amountExpression: String(preview.payload.amount), reason: preview.payload.reason, requestId: input.requestId,
+    expectedHash: preview.expectedHash, csrf: session.csrf };
+  return page('월간 예산 배정 이동 미리보기', `<p>${escape(preview.payload.fromMonth)} → ${escape(preview.payload.toMonth)} · ${preview.payload.amount.toLocaleString('ko-KR')}원 · 사유: ${escape(preview.payload.reason)}</p>
+    <p>아직 저장하지 않았습니다. 두 월 사이의 배정 시점이 바뀌므로 중간 월의 이월 잔액과 미배정 자금에도 영향을 줍니다. 아래는 양쪽 월의 변화입니다. 음수 잔액이나 미배정 자금도 확인하세요. 실제 원장·지출·계좌 잔액은 변경하지 않습니다.</p>
+    ${renderBudgetMonthImpacts(preview.impacts)}<form method="post" action="/admin/budget/move-month">${Object.entries(fields).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('')}
+    <button>이 내용으로 월간 배정 이동 저장</button></form><p><a href="/admin/budget?month=${encodeURIComponent(preview.payload.fromMonth)}">예산으로 돌아가기</a></p>`);
+}
+
 function renderBudget(book, session, month, message = '') {
   assertMonth(month);
   if (session.role !== 'owner') throw new Error('Owner access required');
@@ -634,6 +655,9 @@ function renderBudget(book, session, month, message = '') {
     <td>${escape(categories.get(move.payload.fromCategoryId)?.name ?? move.payload.fromCategoryId)}</td>
     <td>${escape(categories.get(move.payload.toCategoryId)?.name ?? move.payload.toCategoryId)}</td>
     <td>${move.payload.amount.toLocaleString('ko-KR')}</td></tr>`).join('');
+  const monthMoves = budgetMonthMoves(book, session.sub, month).map(move => `<details><summary>${escape(move.createdAt)} (UTC) · ${escape(move.payload.fromMonth)} → ${escape(move.payload.toMonth)} · ${move.payload.amount.toLocaleString('ko-KR')}원</summary>
+    <p>작업자: ${escape(move.payload.actor)} · 사유: ${escape(move.payload.reason)} · 요청 ID: ${escape(move.id)}</p>
+    <p><a href="/admin/budget?month=${encodeURIComponent(move.payload.fromMonth)}">출발 월</a> · <a href="/admin/budget?month=${encodeURIComponent(move.payload.toMonth)}">도착 월</a> · 아래 금액은 이동 당시 내역입니다.</p>${renderBudgetMonthImpacts(move.impacts)}</details>`).join('');
   const categoryLink = categoryId => `/admin/budget/category?${escape(new URLSearchParams({ month, categoryId }).toString())}`;
   const warnings = alerts.categories.length ? `<section class="error" aria-label="예산 초과 경고"><h2>예산 초과 ${alerts.categories.length}개 · 총 ${alerts.deficit.toLocaleString('ko-KR')}원</h2>
     <p>이월을 포함한 남은 예산이 음수인 항목입니다. 다른 카테고리의 잔액으로 초과 금액을 상계하지 않습니다. 이전 달의 부족액이 이월된 경우도 포함합니다.</p>
@@ -678,7 +702,13 @@ function renderBudget(book, session, month, message = '') {
       <label>받는 카테고리</label><select name="toCategoryId">${options}</select>
       <label>이동 금액 (사칙연산 가능)</label><input name="amountExpression" required>
       <button ${categories.size < 2 ? 'disabled' : ''}>예산 이동</button></form>
-    <h2>이번 달 최근 이동 기록</h2><table><tr><th>저장 시각 (UTC)</th><th>보내는 항목</th><th>받는 항목</th><th>금액</th></tr>${moves}</table>`);
+    <h2>이번 달 최근 이동 기록</h2><table><tr><th>저장 시각 (UTC)</th><th>보내는 항목</th><th>받는 항목</th><th>금액</th></tr>${moves}</table>
+    <h2>월간 예산 배정 이동</h2><p>출발 월의 배정액 일부를 다른 월의 같은 카테고리 또는 다른 카테고리로 옮깁니다. 지출·이월액 자체는 이동하지 않으며 월간 배정 시점 변경으로 중간 월 잔액이 달라질 수 있습니다. 출발 월 배정액 안에서만 이동합니다.</p>
+    <form method="post" action="/admin/budget/move-month/preview"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="fromMonth" value="${escape(month)}"><input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>보내는 카테고리</label><select name="fromCategoryId">${options}</select><label>받는 월</label><input type="month" name="toMonth" max="9999-12" required>
+    <label>받는 카테고리</label><select name="toCategoryId">${options}</select><label>이동 금액 (사칙연산 가능)</label><input name="amountExpression" maxlength="256" required>
+    <label>이동 사유</label><input name="reason" maxlength="200" required><button ${categories.size ? '' : 'disabled'}>월간 배정 이동 미리보기</button></form>
+    <h2>이 월에서 보내거나 받은 최근 월간 이동 (20건)</h2>${monthMoves || '<p>월간 이동 기록이 없습니다.</p>'}`);
 }
 
 function renderBudgetCategoryActivity(book, session, month, categoryId, options) {
@@ -1700,6 +1730,17 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       const result = copyPreviousBudget(book, session.sub, month);
       sendHtml(res, 200, renderBudget(book, session, month,
         `<p class="notice">${result.count}항목, ${result.total.toLocaleString('ko-KR')}원을 복사했습니다.</p>`));
+      return true;
+    }
+    if (req.method === 'POST' && ['/admin/budget/move-month/preview', '/admin/budget/move-month'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const input = Object.fromEntries(['fromMonth', 'toMonth', 'fromCategoryId', 'toCategoryId', 'amountExpression', 'reason', 'requestId', 'expectedHash'].map(key => [key, form.get(key)]));
+      if (pathname.endsWith('/preview')) sendHtml(res, 200, renderBudgetMonthMovePreview(book, session, input));
+      else {
+        const result = moveBudgetMonth(book, session.sub, input);
+        sendHtml(res, 200, renderBudget(book, session, result.payload.fromMonth, `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 월간 배정 이동: ${result.payload.amount.toLocaleString('ko-KR')}원</p>`));
+      }
       return true;
     }
     if (req.method === 'POST' && pathname === '/admin/budget/move') {

@@ -14,6 +14,9 @@ export class Book {
       CREATE TABLE IF NOT EXISTS budget_assignments (month TEXT NOT NULL, category_id TEXT NOT NULL,
         amount INTEGER NOT NULL, PRIMARY KEY (month, category_id));
       CREATE TABLE IF NOT EXISTS budget_moves (id TEXT PRIMARY KEY, month TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS budget_month_moves (id TEXT PRIMARY KEY, from_month TEXT NOT NULL, to_month TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS budget_month_moves_from ON budget_month_moves(from_month);
+      CREATE INDEX IF NOT EXISTS budget_month_moves_to ON budget_month_moves(to_month);
       CREATE TABLE IF NOT EXISTS budget_targets (category_id TEXT PRIMARY KEY, amount INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS budget_goal_fills (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, date TEXT NOT NULL, data TEXT NOT NULL);
