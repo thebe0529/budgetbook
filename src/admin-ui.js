@@ -1085,11 +1085,16 @@ function renderForecast(book, session, query, message = '') {
   const cardMode = query.get('cardMode') || (cardCashId ? 'override' : 'defaults');
   if (!['defaults', 'override', 'exclude'].includes(cardMode)) throw new Error('Invalid card forecast mode');
   if (cardMode === 'override' && !cardCashId) throw new Error('Select a common card cash account');
-  const overrides = Object.fromEntries(schedules.filter(s => query.has(`amount_${s.id}`))
+  const overrides = Object.fromEntries(schedules.filter(s => s.active && query.has(`amount_${s.id}`))
     .map(s => [s.id, query.get(`amount_${s.id}`)]));
+  const dayOffsets = Object.fromEntries(schedules.filter(s => s.active && query.has(`offset_${s.id}`))
+    .map(s => [s.id, query.get(`offset_${s.id}`)]));
   const result = forecast(book, session.sub, { asOf, throughDate,
     cardCashId: cardMode === 'override' ? cardCashId : undefined,
-    useCardDefaults: cardMode === 'defaults', overrides });
+    useCardDefaults: cardMode === 'defaults', overrides, dayOffsets });
+  const scenarioHidden = [...Object.entries(overrides).map(([id, value]) => [`amount_${id}`, value]),
+    ...Object.entries(dayOffsets).map(([id, value]) => [`offset_${id}`, value])]
+    .map(([name, value]) => `<input type="hidden" name="${escape(name)}" value="${escape(value)}">`).join('');
   const missingCards = result.missingCardAccounts.map(item => `<li>${escape(item.name)}:
     ${item.count}회차, ${item.amount.toLocaleString('ko-KR')}원</li>`).join('');
   const cashOptions = cash.map(a => `<option value="${escape(a.id)}" ${a.id === cardCashId ? 'selected' : ''}>
@@ -1115,13 +1120,15 @@ function renderForecast(book, session, query, message = '') {
       <input type="hidden" name="id" value="${escape(s.id)}"><button>중지</button></form>` : '중지됨'}</td></tr>`).join('');
   const overrideInputs = schedules.filter(s => s.active).map(s =>
     `<label>${escape(s.name)} 예상 금액 (원, 음수는 지출)</label>
-    <input name="amount_${escape(s.id)}" value="${escape(overrides[s.id] ?? s.amount)}">`).join('');
+    <input name="amount_${escape(s.id)}" value="${escape(overrides[s.id] ?? s.amount)}">
+    <label>${escape(s.name)} 시점 조정 일수 (음수는 앞당김, 양수는 늦춤)</label><input type="number" name="offset_${escape(s.id)}" min="-366" max="366" step="1" value="${escape(dayOffsets[s.id] ?? 0)}" required>`).join('');
   const eventRows = result.events.map(e => {
-    const candidates = e.scheduleId ? matchingEntries(book, session.sub, e.scheduleId, e.date) : [];
+    const originalDate = e.originalDate ?? e.date;
+    const candidates = e.scheduleId ? matchingEntries(book, session.sub, e.scheduleId, originalDate) : [];
     const link = candidates.length ? `<form method="post" action="/admin/forecast/link">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="scheduleId" value="${escape(e.scheduleId)}">
-      <input type="hidden" name="date" value="${escape(e.date)}">
+      <input type="hidden" name="date" value="${escape(originalDate)}">${scenarioHidden}
       <input type="hidden" name="asOf" value="${escape(asOf)}">
       <input type="hidden" name="throughDate" value="${escape(throughDate)}">
       <input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
@@ -1129,7 +1136,7 @@ function renderForecast(book, session, query, message = '') {
       <select name="entryId">${candidates.map(entry => `<option value="${escape(entry.id)}">
       ${escape(entry.date)} ${escape(entry.memo ?? entry.id)}</option>`).join('')}</select>
       <button>실제 거래 연결</button></form>` : '';
-    return `<tr><td>${escape(e.date)}</td><td>${escape(e.type)}</td>
+    return `<tr><td>${escape(e.date)}${e.originalDate ? `<br>원래 예정일 ${escape(e.originalDate)}` : ''}</td><td>${escape(e.type)}</td>
     <td>${escape(e.name)}</td><td>${escape(cash.find(a => a.id === e.accountId)?.name ?? '')}</td>
     <td>${escape(e.amount.toLocaleString('ko-KR'))}</td>
     <td>${escape(e.projectedBalance.toLocaleString('ko-KR'))}${link}</td></tr>`;
@@ -1140,16 +1147,16 @@ function renderForecast(book, session, query, message = '') {
     <td><form method="post" action="/admin/forecast/unlink">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="scheduleId" value="${escape(row.schedule_id)}">
-      <input type="hidden" name="date" value="${escape(row.occurrence_date)}"><button>연결 해제</button>
+      <input type="hidden" name="date" value="${escape(row.occurrence_date)}">${scenarioHidden}<button>연결 해제</button>
       <input type="hidden" name="asOf" value="${escape(asOf)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
       <input type="hidden" name="cardMode" value="${escape(cardMode)}"><input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
     </form></td></tr>`).join('');
   const autoForms = schedules.filter(s => s.active).map(s => {
-    const dates = result.events.filter(e => e.scheduleId === s.id).map(e => e.date);
+    const dates = result.events.filter(e => e.scheduleId === s.id).map(e => e.originalDate ?? e.date);
     if (!dates.length) return '';
     return `<form method="post" action="/admin/forecast/auto-link" style="display:inline">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="scheduleId" value="${escape(s.id)}">
-      ${dates.map(date => `<input type="hidden" name="date" value="${escape(date)}">`).join('')}
+      ${dates.map(date => `<input type="hidden" name="date" value="${escape(date)}">`).join('')}${scenarioHidden}
       <input type="hidden" name="asOf" value="${escape(asOf)}"><input type="hidden" name="throughDate" value="${escape(throughDate)}">
       <input type="hidden" name="cardMode" value="${escape(cardMode)}"><input type="hidden" name="cardCashId" value="${escape(cardCashId)}">
       <button>자동 매칭: ${escape(s.name)}</button></form>`;
@@ -1158,7 +1165,7 @@ function renderForecast(book, session, query, message = '') {
     종료 예상 ${result.projectedTotal.toLocaleString('ko-KR')}원</p>
     ${missingCards ? `<p class="error">기본 출금 계좌가 없어 예상에 포함되지 않은 카드 예정액입니다. <a href="/admin/cards">카드 설정</a>에서 계좌를 지정하세요.</p><ul>${missingCards}</ul>` : ''}
     <p>예정 거래는 실제 원장에 기록되지 않습니다. 이미 입력한 미래 일자 거래는 별도 확정 거래로 표시됩니다.</p>
-    <h2>조회·임시 시뮬레이션</h2><form method="get" action="/admin/forecast">
+    <h2>조회·임시 시뮬레이션</h2><p>금액과 시점 조정은 이번 예상 계산에만 적용합니다. 월별 회차마다 원래 예정일에 같은 일수를 더하며 저장된 일정·실제 거래·카드 결제 예정일은 바꾸지 않습니다. 실제 거래 연결과 자동 매칭은 원래 예정일·저장된 금액을 기준으로 합니다.</p><form method="get" action="/admin/forecast">
       <label>기준일</label><input type="date" name="asOf" value="${escape(asOf)}" required>
       <label>종료일 (최대 10년)</label><input type="date" name="throughDate" value="${escape(throughDate)}" required>
       <label>카드 예상 방식</label><select name="cardMode">
@@ -1368,6 +1375,14 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       if (form.get('csrf') !== session.csrf) {
         sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true;
       }
+      const forecastQuery = new URLSearchParams({ asOf: form.get('asOf') || '', throughDate: form.get('throughDate') || '',
+        cardCashId: form.get('cardCashId') || '', cardMode: form.get('cardMode') || (form.get('cardCashId') ? 'override' : 'defaults') });
+      for (const schedule of listSchedules(book, session.sub).filter(s => s.active)) for (const prefix of ['amount_', 'offset_']) {
+        const key = prefix + schedule.id;
+        if (form.has(key)) forecastQuery.set(key, form.get(key));
+      }
+      // Reject malformed simulation fields before applying a real schedule/link mutation.
+      if ([...forecastQuery.keys()].some(key => key.startsWith('amount_') || key.startsWith('offset_'))) renderForecast(book, session, forecastQuery);
       if (pathname.endsWith('disable')) disableSchedule(book, session.sub, form.get('id'));
       else if (pathname.endsWith('unlink')) unlinkOccurrence(book, session.sub, {
         scheduleId: form.get('scheduleId'), date: form.get('date'),
@@ -1383,11 +1398,7 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         amountExpression: form.get('amountExpression'), startDate: form.get('startDate'),
         endDate: form.get('endDate'), frequency: form.get('frequency'),
       });
-      sendHtml(res, 200, renderForecast(book, session, new URLSearchParams({
-        asOf: form.get('asOf') || '', throughDate: form.get('throughDate') || '',
-        cardCashId: form.get('cardCashId') || '',
-        cardMode: form.get('cardMode') || (form.get('cardCashId') ? 'override' : 'defaults'),
-      }),
+      sendHtml(res, 200, renderForecast(book, session, forecastQuery,
         '<p class="notice">예정 거래를 변경했습니다.</p>'));
       return true;
     }

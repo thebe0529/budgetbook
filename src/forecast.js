@@ -127,7 +127,15 @@ export function disableSchedule(book, sub, id) {
   return schedule;
 }
 
-export function forecast(book, sub, { asOf, throughDate, cardCashId, useCardDefaults = false, overrides = {} }) {
+function shiftDate(date, days) {
+  const shifted = new Date(`${date}T00:00:00Z`);
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  const result = shifted.toISOString().slice(0, 10);
+  assertDate(result);
+  return result;
+}
+
+export function forecast(book, sub, { asOf, throughDate, cardCashId, useCardDefaults = false, overrides = {}, dayOffsets = {} }) {
   owner(book, sub);
   assertDate(asOf);
   assertDate(throughDate);
@@ -138,6 +146,11 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, useCardDefa
   if (typeof useCardDefaults !== 'boolean' || useCardDefaults && cardCashId) throw new Error('Invalid card forecast mode');
   if (cardCashId && !cash.some(a => a.id === cardCashId)) throw new Error('Invalid card payment account');
   const schedules = listSchedules(book, sub).filter(s => s.active);
+  if (!dayOffsets || typeof dayOffsets !== 'object' || Array.isArray(dayOffsets) ||
+    Object.entries(dayOffsets).some(([id, days]) => !schedules.some(s => s.id === id) ||
+      !['number', 'string'].includes(typeof days) || !/^-?(?:0|[1-9][0-9]{0,2})$/.test(String(days)) || !Number.isSafeInteger(Number(days)) || Math.abs(Number(days)) > 366)) {
+    throw new Error('Schedule day offset must be an integer from -366 to 366 for an active schedule');
+  }
   const entries = book.entries();
   const linked = new Set(linkedOccurrences(book, sub).filter(row => {
     const schedule = schedules.find(s => s.id === row.schedule_id);
@@ -149,23 +162,28 @@ export function forecast(book, sub, { asOf, throughDate, cardCashId, useCardDefa
     throw new Error('Unknown simulation schedule');
   }
   const events = [];
-  const append = (date, type, name, amount, accountId, scheduleId) => {
+  const append = (date, type, name, amount, accountId, scheduleId, originalDate) => {
     if (date > asOf && date <= throughDate) events.push({ date, type, name, amount, accountId,
-      ...(scheduleId ? { scheduleId } : {}) });
+      ...(scheduleId ? { scheduleId } : {}), ...(originalDate ? { originalDate } : {}) });
   };
   for (const s of schedules) {
     const amount = overrides[s.id] === undefined ? s.amount : calculateAmount(overrides[s.id]);
+    const offset = Number(dayOffsets[s.id] ?? 0);
+    const simulated = date => offset ? shiftDate(date, offset) : date;
     if (s.frequency === 'once') {
       if ((!s.endDate || s.startDate <= s.endDate) &&
-        !linked.has(`${s.id}:${s.startDate}`)) append(s.startDate, 'schedule', s.name, amount, s.accountId, s.id);
+        !linked.has(`${s.id}:${s.startDate}`)) append(simulated(s.startDate), 'schedule', s.name, amount, s.accountId, s.id, offset ? s.startDate : undefined);
     } else {
       const [startYear, startMonth] = s.startDate.split('-').map(Number);
       const [currentYear, currentMonth] = asOf.split('-').map(Number);
-      const first = Math.max(0, (currentYear - startYear) * 12 + currentMonth - startMonth - 1);
-      for (let i = first; i < first + 123; i++) {
+      // Delayed occurrences may originate before the forecast window; advances may originate after it.
+      const first = Math.max(0, (currentYear - startYear) * 12 + currentMonth - startMonth - (offset > 0 ? 14 : 1));
+      for (let i = first; i < first + 151; i++) {
         const date = addMonths(s.startDate, i);
-        if (date > throughDate || s.endDate && date > s.endDate) break;
-        if (!linked.has(`${s.id}:${date}`)) append(date, 'schedule', s.name, amount, s.accountId, s.id);
+        if (s.endDate && date > s.endDate) break;
+        const adjustedDate = simulated(date);
+        if (adjustedDate > throughDate) break;
+        if (!linked.has(`${s.id}:${date}`)) append(adjustedDate, 'schedule', s.name, amount, s.accountId, s.id, offset ? date : undefined);
       }
     }
   }
