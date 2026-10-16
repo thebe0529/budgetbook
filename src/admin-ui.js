@@ -2,6 +2,7 @@ import { getParserRules, issueAccountKey, issueApiKey, revokeKey, saveParserRule
 import { parsePush } from './push-parser.js';
 import { canAccessAccount, member, removeMember, setMember, visibleAccounts } from './members.js';
 import { approveEvent, listReviewEvents } from './review.js';
+import { actualCsvPreview, importActualCsv } from './actual-csv.js';
 import { randomUUID } from 'node:crypto';
 import { accountOverview, accountRegister, createCategory, createGroup,
   createLedgerAccount, moveAccountGroup, renameGroup, recordManual } from './manual.js';
@@ -1197,7 +1198,7 @@ function sendHtml(res, status, html) {
   res.end(html);
 }
 
-async function formBody(req) {
+async function formBody(req, maxBytes = 16_384) {
   if (!req.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) {
     throw new Error('Invalid form content type');
   }
@@ -1205,7 +1206,7 @@ async function formBody(req) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 16_384) throw new Error('Form too large');
+    if (size > maxBytes) throw new Error('Form too large');
     chunks.push(chunk);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
@@ -1252,6 +1253,33 @@ function renderConfig(book, session, accountId, values, message = '') {
     <h3>현재 활성 키</h3><ul>${keyRows || '<li>없음</li>'}</ul>`);
 }
 
+function renderActualCsv(book, session, accountId = '', message = '') {
+  const accounts = visibleAccounts(book, session.sub).filter(account => ['asset', 'liability'].includes(account.type) && canAccessAccount(book, session.sub, account.id, 'write'));
+  if (accountId && !accounts.some(account => account.id === accountId)) throw new Error('Account write access required');
+  if (!accounts.length) throw new Error('Financial account write access required');
+  return page('Actual CSV 가져오기', `${message}<p>Actual에서 계좌 하나의 단순 수입·지출을 CSV로 내보낸 뒤 내용을 붙여넣으세요. Date(YYYY-MM-DD)·Amount 열이 필요하며 Account·Payee·Notes·Category·Cleared·Reconciled를 보존합니다. UTF-8, 쉼표 구분, 최대 100 KB·200건을 지원합니다.</p>
+    <p>금액은 원 단위 그대로 읽고 소수부는 .0 또는 .00만 허용합니다. 음수는 지출, 양수는 수입입니다. 분할·이체·초기잔액·카드대금 납부·환불은 별도 흐름을 사용하세요. 부채 계좌에는 음수 지출만 가져올 수 있습니다. 대상 계좌는 직접 선택하며 원래 계좌명과 자동 연결하지 않습니다.</p>
+    <p>검토함에 넣은 뒤 상대 계정과 예산 카테고리를 확인해 건별 승인합니다. 원래 카테고리·확인 상태는 참고 정보이며 자동 적용하지 않습니다.</p>
+    <form method="post" action="/admin/actual-csv/preview"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>BudgetBook 대상 계좌</label><select name="accountId">${accounts.map(account => `<option value="${escape(account.id)}"${account.id === accountId ? ' selected' : ''}>${escape(account.name)}</option>`).join('')}</select>
+    <label>Actual CSV 내용</label><textarea name="csvText" rows="12" required placeholder="Account,Date,Payee,Notes,Category,Amount,Cleared,Reconciled"></textarea><button>가져오기 미리보기</button></form>
+    <p><a href="/admin/review">수신 검토함으로 이동</a></p>`);
+}
+
+function renderActualCsvPreview(book, session, input) {
+  const preview = actualCsvPreview(book, session.sub, input);
+  const fields = { accountId: input.accountId, csvText: input.csvText, requestId: input.requestId, expectedHash: preview.expectedHash, csrf: session.csrf };
+  return page('Actual CSV 가져오기 미리보기', `<p>아직 저장하지 않았습니다. Actual 원래 계좌: ${escape(preview.sourceAccount || '열 없음')} → BudgetBook 대상: ${escape(preview.account.name)}</p>
+    <p>${preview.rows.length}건 · 수입 ${preview.inflow.toLocaleString('ko-KR')}원 · 지출 ${preview.outflow.toLocaleString('ko-KR')}원</p>
+    ${preview.duplicate ? '<p class="notice">같은 내용은 이미 가져왔습니다. 다시 저장해도 검토 거래를 추가하지 않습니다.</p>' : ''}
+    ${preview.possibleDuplicateCount ? `<p class="error">기존 CSV 검토 내역과 날짜·금액·거래처·메모가 같은 ${preview.possibleDuplicateCount}건이 있습니다. 실제로 별개 거래인지 확인하세요. 자동으로 제외하지 않습니다.</p>` : ''}
+    <table><tr><th>일자</th><th>금액</th><th>거래처·메모</th><th>원래 카테고리</th><th>유사 기록</th></tr>${preview.rows.map(row => `<tr><td>${escape(row.date)}</td><td>${row.amount.toLocaleString('ko-KR')}원</td><td>${escape(row.payee)} · ${escape(row.notes)}</td><td>${escape(row.category)}</td><td>${row.possibleDuplicate ? '확인 필요' : ''}</td></tr>`).join('')}</table>
+    <form method="post" action="/admin/actual-csv">${Object.entries(fields).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('')}
+    <label><input type="checkbox" name="confirmSimple" value="true" style="width:auto" required>대상 계좌와 금액 단위를 확인했으며 단순 수입·지출만 포함했습니다. 분할·이체·초기잔액·카드대금 납부·환불은 제외했습니다.</label>
+    ${preview.possibleDuplicateCount ? '<label><input type="checkbox" name="confirmDuplicates" value="true" style="width:auto" required>유사 기록을 확인했으며 별개 거래로 모두 추가합니다.</label>' : ''}
+    <button>검토함에 가져오기</button></form><p><a href="/admin/actual-csv">다시 입력</a></p>`);
+}
+
 function renderReview(book, session, message = '') {
   const events = listReviewEvents(book, session.sub);
   const counters = [...book.accounts().values()].filter(a => ['expense', 'income'].includes(a.type));
@@ -1264,7 +1292,7 @@ function renderReview(book, session, message = '') {
       !canEdit ? '<p>읽기 권한만 있습니다.</p>' : `<form method="post" action="/admin/approve">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <input type="hidden" name="eventId" value="${escape(event.id)}">
-      <label>유형</label><select name="kind"><option value="expense">지출</option><option value="income">수입</option></select>
+      <label>유형</label><select name="kind"><option value="expense"${event.source === 'actual-csv' && event.parsed?.amount < 0 ? ' selected' : ''}>지출</option><option value="income"${event.source === 'actual-csv' && event.parsed?.amount > 0 ? ' selected' : ''}>수입</option></select>
       <label>금액(원)</label><input name="amount" inputmode="numeric" value="${escape(Math.abs(event.parsed?.amount ?? 0) || '')}">
       <label>일자</label><input name="date" value="${escape(event.parsed?.date ?? '')}">
       <label>거래처·메모</label><input name="payee" value="${escape(event.parsed?.payee ?? '')}">
@@ -1276,7 +1304,7 @@ function renderReview(book, session, message = '') {
       ${event.parseError ? `<p class="error">파싱: ${escape(event.parseError)}</p>` : ''}
       ${form}</section><hr>`;
   }).join('');
-  return page('수신 거래 검토', `${message}${rows || '<p>수신 내역이 없습니다.</p>'}`);
+  return page('수신 거래 검토', `${message}<p><a href="/admin/actual-csv">Actual CSV 가져오기</a></p>${rows || '<p>수신 내역이 없습니다.</p>'}`);
 }
 
 function renderFamily(book, session, message = '') {
@@ -1363,6 +1391,20 @@ export async function handleAdmin(book, auth, req, res, pathname) {
         await book.backupManager.run();
       }
       sendHtml(res, 200, renderBackups(book, session, '<p class="notice">백업 설정을 반영했습니다.</p>'));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/actual-csv') {
+      sendHtml(res, 200, renderActualCsv(book, session, new URL(req.url, 'http://localhost').searchParams.get('accountId') ?? '')); return true;
+    }
+    if (req.method === 'POST' && ['/admin/actual-csv/preview', '/admin/actual-csv'].includes(pathname)) {
+      const form = await formBody(req, 1_048_576);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      const input = Object.fromEntries(['accountId', 'csvText', 'requestId', 'expectedHash'].map(key => [key, form.get(key)]));
+      if (pathname.endsWith('/preview')) sendHtml(res, 200, renderActualCsvPreview(book, session, input));
+      else {
+        const result = importActualCsv(book, session.sub, { ...input, confirmSimple: form.get('confirmSimple') === 'true', confirmDuplicates: form.get('confirmDuplicates') === 'true' });
+        sendHtml(res, 200, renderReview(book, session, `<p class="notice">${result.duplicate ? '이미 가져온' : '검토함에 가져온'} CSV ${result.count}건입니다. 아직 원장에 승인하지 않았습니다.</p>`));
+      }
       return true;
     }
     if (req.method === 'GET' && pathname === '/admin/forecast') {

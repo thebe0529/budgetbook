@@ -2,7 +2,7 @@ import { assertDate } from './ledger.js';
 import { canAccessAccount } from './members.js';
 
 export function listReviewEvents(book, userSub) {
-  return book.db.prepare("SELECT data FROM import_events WHERE channel_id LIKE 'push:%' ORDER BY rowid DESC")
+  return book.db.prepare("SELECT data FROM import_events WHERE channel_id LIKE 'push:%' OR channel_id LIKE 'csv:%' ORDER BY rowid DESC")
     .all().map(row => JSON.parse(row.data))
     .filter(event => canAccessAccount(book, userSub, event.accountId));
 }
@@ -10,7 +10,7 @@ export function listReviewEvents(book, userSub) {
 export function reviewEvent(book, userSub, eventId) {
   const row = book.db.prepare('SELECT data FROM import_events WHERE id = ?').get(eventId);
   const event = row && JSON.parse(row.data);
-  return event?.channelId?.startsWith('push:') && canAccessAccount(book, userSub, event.accountId) ?
+  return (event?.channelId?.startsWith('push:') || event?.channelId?.startsWith('csv:')) && canAccessAccount(book, userSub, event.accountId) ?
     event : null;
 }
 

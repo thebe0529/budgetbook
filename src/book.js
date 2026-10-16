@@ -11,6 +11,8 @@ export class Book {
       CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_groups (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_budget_changes (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS actual_csv_batches (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS actual_csv_requests (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS account_budget_changes_account ON account_budget_changes(account_id);
       CREATE TABLE IF NOT EXISTS budget_categories (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS budget_assignments (month TEXT NOT NULL, category_id TEXT NOT NULL,
