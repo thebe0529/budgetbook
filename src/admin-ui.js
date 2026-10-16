@@ -5,6 +5,7 @@ import { approveEvent, listReviewEvents } from './review.js';
 import { randomUUID } from 'node:crypto';
 import { accountOverview, accountRegister, createCategory, createGroup,
   createLedgerAccount, moveAccountGroup, renameGroup, recordManual } from './manual.js';
+import { accountBudgetModePreview, changeAccountBudgetMode, accountBudgetModeHistory } from './account-budget-mode.js';
 import { calculateAmount } from './amount-expression.js';
 import { addMonths, assertDate, assertMonth } from './ledger.js';
 import { readFileSync } from 'node:fs';
@@ -76,7 +77,8 @@ function renderAccounts(book, session, message = '') {
     <select name="groupId" aria-label="${escape(a.name)} 그룹"><option value="">그룹 없음</option>${allGroups.filter(g => g.type === a.type)
       .map(g => `<option value="${escape(g.id)}" ${accountMap.get(a.id)?.groupId === g.id ? 'selected' : ''}>${escape(g.name)}</option>`).join('')}</select><button>그룹 변경</button></form>`;
   const rows = overview.map(a => `<tr><td><a href="/admin/register?accountId=${encodeURIComponent(a.id)}">${escape(a.name)}</a></td>
-    <td>${escape(a.type)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}원</td><td>${groupControls(a)}</td></tr>`).join('');
+    <td>${escape(a.type)}</td><td>${escape(a.balance.toLocaleString('ko-KR'))}원</td><td>${groupControls(a)}</td>
+    <td>${['asset', 'liability'].includes(a.type) ? `${accountMap.get(a.id)?.onBudget ? '온버짓' : '오프버짓'}${session.role === 'owner' ? ` · <a href="/admin/accounts/budget-mode?accountId=${encodeURIComponent(a.id)}">예산 포함 설정</a>` : ''}` : ''}</td></tr>`).join('');
   const typeOptions = ['asset', 'liability', 'equity', 'income', 'expense']
     .map(type => `<option value="${type}">${type}</option>`).join('');
   const groups = book.accountGroups().map(g => `<option value="${escape(g.id)}">${escape(g.name)} (${g.type})</option>`).join('');
@@ -98,8 +100,38 @@ function renderAccounts(book, session, message = '') {
     <h2>예산 카테고리 추가</h2><form method="post" action="/admin/categories">
       <input type="hidden" name="csrf" value="${escape(session.csrf)}">
       <label>카테고리명</label><input name="name" required><button>카테고리 생성</button></form>`;
-  return page('계좌 관리', `${message}<table><thead><tr><th>계좌</th><th>유형</th><th>잔액</th><th>그룹 변경</th></tr></thead>
+  return page('계좌 관리', `${message}<table><thead><tr><th>계좌</th><th>유형</th><th>잔액</th><th>그룹 변경</th><th>예산 포함</th></tr></thead>
     <tbody>${rows}</tbody></table>${controls}`);
+}
+
+function renderBudgetModeImpact(change) {
+  const labels = { availableFunds: '가용 자금', readyToAssign: '미배정 자금', budgeted: '조회 월 배정', spent: '조회 월 예산 지출', categoryBalance: '이월 포함 카테고리 잔액 합계' };
+  return `<table><tr><th>조회 월 ${escape(change.payload.month)}</th><th>변경 전</th><th>변경 후</th></tr>${Object.entries(labels).map(([key, label]) => `<tr><td>${label}</td><td>${change.before[key].toLocaleString('ko-KR')}원</td><td>${change.after[key].toLocaleString('ko-KR')}원</td></tr>`).join('')}</table>`;
+}
+
+function renderAccountBudgetMode(book, session, accountId, month, message = '') {
+  const history = accountBudgetModeHistory(book, session.sub, accountId); assertMonth(month);
+  const account = book.accounts().get(accountId);
+  return page('계좌 예산 포함 설정', `${message}<p>${escape(account.name)} · 현재 ${account.onBudget ? '온버짓' : '오프버짓'}</p>
+    <p>이 설정은 적용 시작일 없이 전체 기간에 반영됩니다. 조회 월은 영향 계산의 기준일 뿐 변경 적용 월이 아닙니다. 자산 잔액은 가용 자금에 더하고 부채 잔액은 뺍니다. 기존 원장·예산 배분·배정은 유지하며 과거 지출을 자동 분류하지 않습니다.</p>
+    <form method="post" action="/admin/accounts/budget-mode/preview"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><input type="hidden" name="accountId" value="${escape(accountId)}"><input type="hidden" name="requestId" value="${randomUUID()}">
+    <label>변경할 예산 포함 상태</label><select name="onBudget"><option value="${account.onBudget ? 'false' : 'true'}">${account.onBudget ? '오프버짓으로 변경' : '온버짓으로 변경'}</option></select>
+    <label>영향을 확인할 월 (적용 시작 월 아님)</label><input type="month" name="month" max="9999-12" value="${escape(month)}" required>
+    <label>변경 사유</label><input name="reason" maxlength="200" required><button>변경 영향 미리보기</button></form>
+    <h2>최근 설정 변경 이력 (20건)</h2>${history.map(saved => `<details><summary>${escape(saved.createdAt)} (UTC) · ${saved.account.onBudget ? '온버짓' : '오프버짓'} → ${saved.payload.onBudget ? '온버짓' : '오프버짓'}</summary><p>작업자: ${escape(saved.payload.actor)} · 사유: ${escape(saved.payload.reason)} · 당시 계좌명: ${escape(saved.account.name)} · 요청 ID: ${escape(saved.id)}. 아래는 변경 당시 계산입니다.</p>${renderBudgetModeImpact(saved)}</details>`).join('') || '<p>설정 변경 이력이 없습니다.</p>'}
+    <p><a href="/admin/accounts">계좌로 돌아가기</a></p>`);
+}
+
+function renderAccountBudgetModePreview(book, session, input) {
+  const preview = accountBudgetModePreview(book, session.sub, input);
+  const fields = { ...preview.payload, onBudget: String(preview.payload.onBudget), requestId: input.requestId, expectedHash: preview.expectedHash, csrf: session.csrf };
+  return page('예산 포함 변경 미리보기', `<p>${escape(preview.account.name)} · ${preview.account.onBudget ? '온버짓' : '오프버짓'} → ${preview.payload.onBudget ? '온버짓' : '오프버짓'} · 사유: ${escape(preview.payload.reason)}</p>
+    <p>아직 저장하지 않았습니다. 변경은 전체 기간에 반영되며 아래 월은 계산 예시입니다. 원장 잔액·재무보고서·기존 예산 배분과 배정은 그대로입니다. 기존 미분류 지출을 자동 분류하지 않습니다.</p>
+    <p>계좌 관련 분개 ${preview.relatedCount}건 · 예산 배분 연결 ${preview.allocatedCount}건 · 예산 배분 없는 비용 분개 ${preview.unallocatedExpenseCount}건 (전체 기간)</p>${renderBudgetModeImpact(preview)}
+    ${preview.blockers.map(reason => `<p class="error">${escape(reason)}</p>`).join('')}
+    ${preview.after.readyToAssign < 0 ? '<p class="error">변경 후 미배정 자금이 음수입니다. 가용 자금과 배정액을 확인하세요.</p>' : ''}
+    ${preview.canApply ? `<form method="post" action="/admin/accounts/budget-mode">${Object.entries(fields).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`).join('')}<button>이 내용으로 예산 포함 설정 변경</button></form>` : '<p>이 상태에서는 설정을 변경할 수 없습니다.</p>'}
+    <p><a href="/admin/accounts/budget-mode?${escape(new URLSearchParams({ accountId: input.accountId, month: input.month }).toString())}">설정으로 돌아가기</a></p>`);
 }
 
 function renderRegister(book, session, accountId, message = '', filters = registerFilters(new URLSearchParams()), entryDefaults = null) {
@@ -1850,6 +1882,23 @@ export async function handleAdmin(book, auth, req, res, pathname) {
       book.assignBudget(month, form.get('categoryId'), amount);
       sendHtml(res, 200, renderBudget(book, session, month,
         '<p class="notice">월별 예산을 저장했습니다.</p>'));
+      return true;
+    }
+    if (req.method === 'GET' && pathname === '/admin/accounts/budget-mode') {
+      const query = new URL(req.url, 'http://localhost').searchParams;
+      const month = query.get('month') ?? new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' }).slice(0, 7);
+      sendHtml(res, 200, renderAccountBudgetMode(book, session, query.get('accountId'), month)); return true;
+    }
+    if (req.method === 'POST' && ['/admin/accounts/budget-mode/preview', '/admin/accounts/budget-mode'].includes(pathname)) {
+      const form = await formBody(req);
+      if (form.get('csrf') !== session.csrf) { sendHtml(res, 403, page('접근 거부', '<p>요청 검증에 실패했습니다.</p>')); return true; }
+      if (!['true', 'false'].includes(form.get('onBudget'))) throw new Error('Boolean budget mode required');
+      const input = Object.fromEntries(['accountId', 'month', 'reason', 'requestId', 'expectedHash'].map(key => [key, form.get(key)])); input.onBudget = form.get('onBudget') === 'true';
+      if (pathname.endsWith('/preview')) sendHtml(res, 200, renderAccountBudgetModePreview(book, session, input));
+      else {
+        const result = changeAccountBudgetMode(book, session.sub, input);
+        sendHtml(res, 200, renderAccountBudgetMode(book, session, input.accountId, input.month, `<p class="notice">${result.duplicate ? '이미 처리한' : '처리한'} 예산 포함 설정 변경입니다.</p>`));
+      }
       return true;
     }
     if (req.method === 'POST' && ['/admin/groups/rename', '/admin/accounts/group'].includes(pathname)) {
